@@ -1,0 +1,7 @@
+python-telegram-bot>=22,<23
+google-cloud-bigquery>=3.25
+google-genai>=1.30
+python-dotenv>=1.0
+openai>=1.60
+anthropic>=0.60
+faster-whisper>=1.1   # local voice transcription (Claude/ChatGPT)

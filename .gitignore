@@ -1,0 +1,8 @@
+.env
+*.json
+*.sqlite3
+__pycache__/
+interaction_log_failed.jsonl
+.venv/
+.DS_Store
+*.sqlite3-journal
