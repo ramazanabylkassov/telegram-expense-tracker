@@ -95,6 +95,41 @@ class PendingStore:
                    PRIMARY KEY (user_id, day, kind))"""
         )
         self.db.execute(
+            """CREATE TABLE IF NOT EXISTS voice_notes (
+                   gid TEXT PRIMARY KEY,           -- links the transcript to its proposals (payload "group")
+                   user_id INTEGER NOT NULL,
+                   chat_id INTEGER,
+                   transcript_message_id INTEGER,  -- the 🎙 message (replying to it = a correction)
+                   prompt_message_id INTEGER,      -- the "send the corrected text" message
+                   transcript TEXT NOT NULL,       -- current text (the last correction, if any)
+                   source TEXT NOT NULL,           -- voice | upload_audio
+                   sent_at TEXT NOT NULL,          -- when the recording was sent: dates stay relative to it
+                   proposed INTEGER NOT NULL DEFAULT 0,
+                   saved INTEGER NOT NULL DEFAULT 0,
+                   fixes INTEGER NOT NULL DEFAULT 0,
+                   created_at TEXT NOT NULL)"""
+        )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS report_rows (
+                   report_id TEXT NOT NULL,        -- one detailed report as sent
+                   user_id INTEGER NOT NULL,
+                   idx INTEGER NOT NULL,           -- the line number shown in the report
+                   expense_id TEXT NOT NULL,
+                   summary TEXT NOT NULL,          -- plain text of the line, for the confirmation
+                   deleted INTEGER NOT NULL DEFAULT 0,
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY (report_id, idx))"""
+        )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS report_messages (
+                   report_id TEXT NOT NULL,
+                   user_id INTEGER NOT NULL,
+                   chat_id INTEGER NOT NULL,
+                   message_id INTEGER NOT NULL,    -- the report itself or its "which line?" prompt
+                   created_at TEXT NOT NULL,
+                   PRIMARY KEY (chat_id, message_id))"""
+        )
+        self.db.execute(
             """CREATE TABLE IF NOT EXISTS deletions (
                    user_id INTEGER NOT NULL,
                    deleted_at TEXT NOT NULL,       -- when they confirmed "delete my data" (UTC)
@@ -111,6 +146,106 @@ class PendingStore:
                    blocked_at TEXT NOT NULL)"""
         )
         self.db.commit()
+
+    # ---- voice transcripts that can be corrected ----------------------------- #
+
+    VOICE_NOTE_DAYS = 7  # a transcript can be corrected for a week
+
+    def add_voice_note(self, gid: str, user_id: int, transcript: str, source: str, sent_at: str):
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.VOICE_NOTE_DAYS)).isoformat()
+        self.db.execute("DELETE FROM voice_notes WHERE created_at < ?", (cutoff,))
+        self.db.execute(
+            "INSERT INTO voice_notes (gid, user_id, transcript, source, sent_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (gid, user_id, transcript, source, sent_at, _now()),
+        )
+        self.db.commit()
+
+    def set_voice_note_message(self, gid: str, chat_id: int, message_id: int):
+        self.db.execute("UPDATE voice_notes SET chat_id = ?, transcript_message_id = ? WHERE gid = ?",
+                        (chat_id, message_id, gid))
+        self.db.commit()
+
+    def set_voice_note_prompt(self, gid: str, message_id: int):
+        self.db.execute("UPDATE voice_notes SET prompt_message_id = ? WHERE gid = ?", (message_id, gid))
+        self.db.commit()
+
+    _VN_COLS = ("gid", "user_id", "chat_id", "transcript_message_id", "prompt_message_id", "transcript",
+                "source", "sent_at", "proposed", "saved", "fixes", "created_at")
+
+    def voice_note(self, gid: str) -> dict | None:
+        row = self.db.execute(f"SELECT {', '.join(self._VN_COLS)} FROM voice_notes WHERE gid = ?", (gid,)).fetchone()
+        return dict(zip(self._VN_COLS, row)) if row else None
+
+    def voice_note_for_reply(self, user_id: int, chat_id: int, message_id: int) -> dict | None:
+        """The transcript a reply is correcting: a reply to the 🎙 message or to the fix prompt."""
+        row = self.db.execute(
+            f"SELECT {', '.join(self._VN_COLS)} FROM voice_notes WHERE user_id = ? AND chat_id = ? "
+            f"AND (transcript_message_id = ? OR prompt_message_id = ?)",
+            (user_id, chat_id, message_id, message_id),
+        ).fetchone()
+        return dict(zip(self._VN_COLS, row)) if row else None
+
+    def voice_note_counts(self, gid: str, proposed: int = 0, saved: int = 0):
+        self.db.execute("UPDATE voice_notes SET proposed = proposed + ?, saved = saved + ? WHERE gid = ?",
+                        (proposed, saved, gid))
+        self.db.commit()
+
+    def voice_note_fixed(self, gid: str, transcript: str):
+        self.db.execute("UPDATE voice_notes SET transcript = ?, fixes = fixes + 1 WHERE gid = ?", (transcript, gid))
+        self.db.commit()
+
+    def pending_in_group(self, user_id: int, gid: str) -> list[tuple[str, int | None, int | None]]:
+        """Unanswered proposals that came from this transcript: (pid, chat_id, message_id)."""
+        rows = self.db.execute(
+            "SELECT id, chat_id, message_id, payload FROM pending WHERE user_id = ?", (user_id,)
+        ).fetchall()
+        return [(pid, c, m) for pid, c, m, p in rows if json.loads(p).get("group") == gid]
+
+    # ---- detailed reports: line number -> expense ------------------------------ #
+
+    REPORT_DAYS = 7  # lines of a report can be deleted by number for a week
+
+    def save_report(self, report_id: str, user_id: int, rows: list[tuple[int, str, str]]):
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.REPORT_DAYS)).isoformat()
+        self.db.execute("DELETE FROM report_rows WHERE created_at < ?", (cutoff,))
+        self.db.execute("DELETE FROM report_messages WHERE created_at < ?", (cutoff,))
+        now = _now()
+        self.db.executemany(
+            "INSERT INTO report_rows (report_id, user_id, idx, expense_id, summary, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            [(report_id, user_id, idx, eid, summary, now) for idx, eid, summary in rows],
+        )
+        self.db.commit()
+
+    def add_report_message(self, report_id: str, user_id: int, chat_id: int, message_id: int):
+        self.db.execute("INSERT OR REPLACE INTO report_messages VALUES (?, ?, ?, ?, ?)",
+                        (report_id, user_id, chat_id, message_id, _now()))
+        self.db.commit()
+
+    def report_for_message(self, user_id: int, chat_id: int, message_id: int) -> str | None:
+        row = self.db.execute(
+            "SELECT report_id FROM report_messages WHERE user_id = ? AND chat_id = ? AND message_id = ?",
+            (user_id, chat_id, message_id),
+        ).fetchone()
+        return row[0] if row else None
+
+    def report_rows(self, report_id: str, user_id: int) -> dict[int, dict]:
+        rows = self.db.execute(
+            "SELECT idx, expense_id, summary, deleted FROM report_rows WHERE report_id = ? AND user_id = ?",
+            (report_id, user_id),
+        ).fetchall()
+        return {i: {"idx": i, "expense_id": e, "summary": s_, "deleted": bool(d)} for i, e, s_, d in rows}
+
+    def mark_expense_deleted(self, expense_id: str):
+        """In every open report, so a line deleted from one report shows as deleted in the others."""
+        self.db.execute("UPDATE report_rows SET deleted = 1 WHERE expense_id = ?", (expense_id,))
+        self.db.commit()
+
+    def saved_entry(self, expense_id: str) -> tuple[int, int, str, dict | None] | None:
+        """(chat_id, message_id, summary, learned) of a save, if its undo history is still here."""
+        row = self.db.execute(
+            "SELECT chat_id, message_id, summary, learned FROM saved WHERE expense_id = ?", (expense_id,)
+        ).fetchone()
+        return (*row[:3], json.loads(row[3]) if row[3] else None) if row else None
 
     # ---- daily limits and blocking -------------------------------------------- #
 
@@ -269,7 +404,8 @@ class PendingStore:
     def forget_user(self, user_id: int):
         """Everything this machine keeps about the person: proposals, undo history, settings."""
         # Kept on purpose: a block and today's usage, so deleting your data isn't a way around them.
-        for table in ("pending", "saved", "report_prefs", "user_settings", "upload_keys"):
+        for table in ("pending", "saved", "report_prefs", "user_settings", "upload_keys", "voice_notes",
+                      "report_rows", "report_messages"):
             self.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
         self.db.commit()
 
@@ -785,7 +921,7 @@ class Warehouse:
             self._add_missing_fact_columns(user_id)
             self._fact_tables_ready.add(user_id)
         rows = self.client.query(
-            f"""SELECT expense_date, amount, currency, category_id, category, description, item_label, merchant
+            f"""SELECT expense_id, expense_date, amount, currency, category_id, category, description, item_label, merchant
                 FROM `{self.fact_table(user_id)}`
                 WHERE expense_date BETWEEN @start AND @end
                 ORDER BY expense_date DESC, created_at DESC""",

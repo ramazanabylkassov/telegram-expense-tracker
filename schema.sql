@@ -106,6 +106,10 @@ CLUSTER BY user_id, event_type, outcome;
 --                | user_blocked | user_unblocked | not_blocked
 --                | dashboard_link | dashboard_off | dashboard_signed_out (button)
 --                | delete_prompt | deleted | delete_error | restored | nothing_to_restore | restore_error
+--   🗑 Delete a line: delete_lines_prompt | report_gone | delete_lines_bad_input | delete_lines_confirm
+--                | already_deleted | lines_deleted (details.lines, details.expense_ids) | delete_lines_cancelled | delete_lines_error
+--   ✏️ Fix text: button fix_prompt | fix_gone; the corrected text is a text row (outcome proposed | no_expense)
+--                with details.transcript_fixed = true, details.original_transcript, details.withdrawn
 --   /start join_<code>: join_prompt | invite_invalid | already_member | in_other_household
 --   household buttons: household_created | invite_link_reset | member_removed | household_end_prompt
 --                | household_ended | household_leave_prompt | household_left | household_joined

@@ -4,6 +4,8 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
+import secrets
 import time
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -11,6 +13,7 @@ from decimal import Decimal
 from telegram import (
     BotCommand,
     BotCommandScopeChat,
+    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -18,6 +21,7 @@ from telegram import (
     Update,
 )
 from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -80,6 +84,7 @@ _last_update: dict = {"at": None}
 async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Runs before every handler: keeps dim_users current, in the background (never delays a reply)."""
     _last_update["at"] = datetime.now(timezone.utc)
+    network_back()
     user = update.effective_user
     if user is not None:
         asyncio.create_task(users.observe(user, role_of(user.id), pending.get_language(user.id)))
@@ -258,10 +263,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = ulang(update)
     if await delete_confirmation(update, context, lang):
         return
-    limit = over_limit(update.effective_user.id, "text")
+    uid, msg = update.effective_user.id, update.effective_message
+    reply_to = getattr(msg, "reply_to_message", None)
+    vn = None
+    if isinstance(getattr(reply_to, "message_id", None), int):
+        rid = pending.report_for_message(uid, update.effective_chat.id, reply_to.message_id)
+        if rid:  # line numbers for 🗑 Delete a line: no AI involved, so no daily limit
+            await ask_delete_lines(update, rid, msg.text, lang)
+            return
+        # a reply to a 🎙 transcript or its fix prompt = a corrected transcript
+        vn = pending.voice_note_for_reply(uid, update.effective_chat.id, reply_to.message_id)
+    limit = over_limit(uid, "text")
     if limit:
         note(outcome="daily_limit", limit=limit)
-        await update.effective_message.reply_text(t(lang, "limit_text", n=limit))
+        await msg.reply_text(t(lang, "limit_text", n=limit))
+        return
+    if vn is not None:
+        await correct_transcript(update, context, vn, msg.text, lang)
         return
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
     text = update.effective_message.text
@@ -310,7 +328,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         note(outcome="parse_error", error=f"{type(e).__name__}: {e}"[:1000])
         await update.effective_message.reply_text(t(lang, "voice_failed"))
         return
-    await propose(update, result, source="voice", raw_input=result.transcript, lang=lang)
+    await propose(update, result, source="voice", raw_input=result.transcript, lang=lang,
+                  sent_at=update.effective_message.date)
 
 
 async def mapping_context(lang: str) -> extractor.MappingContext:
@@ -321,22 +340,42 @@ async def mapping_context(lang: str) -> extractor.MappingContext:
     )
 
 
-async def propose(update: Update, result: extractor.ParseResult, source: str, raw_input: str | None, lang: str):
-    await propose_to(update.effective_message.reply_text, update.effective_user.id, result, source, raw_input, lang)
+async def propose(update: Update, result: extractor.ParseResult, source: str, raw_input: str | None, lang: str,
+                  sent_at: datetime | None = None):
+    await propose_to(update.effective_message.reply_text, update.effective_user.id, result, source, raw_input, lang,
+                     sent_at=sent_at)
+
+
+def fix_keyboard(gid: str, lang: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton(t(lang, "btn_fix_text"), callback_data=f"fx:{gid}")]])
+
+
+def is_message_id(m) -> bool:
+    return isinstance(getattr(m, "message_id", None), int) and isinstance(getattr(m, "chat_id", None), int)
 
 
 async def propose_to(send, user_id: int, result: extractor.ParseResult, source: str,
-                     raw_input: str | None, lang: str) -> int:
+                     raw_input: str | None, lang: str, sent_at: datetime | None = None,
+                     group: str | None = None) -> int:
     """Send one ✅/✏️/🗑 proposal per expense via `send(text, **kwargs)`. Shared by chat messages and
-    Action Button uploads. Returns how many expenses were proposed."""
+    Action Button uploads. Returns how many expenses were proposed.
+    Spoken input first shows the transcript with ✏️ Fix text; `group` = re-proposing a corrected transcript."""
     note(transcript=result.transcript, expenses_found=len(result.expenses))
     spoken = source in ("voice", "upload_audio")
-    if spoken and not (result.transcript or "").strip():
+    if spoken and group is None and not (result.transcript or "").strip():
         note(outcome="empty_audio")
         await send(t(lang, "voice_empty"))
         return 0
-    if result.transcript and spoken:
-        await send(f"🎙 <i>{html.escape(result.transcript)}</i>", parse_mode=ParseMode.HTML)
+    gid = group
+    if spoken and group is None:
+        gid = secrets.token_hex(5)
+        pending.add_voice_note(gid, user_id, result.transcript, source,
+                               (sent_at or datetime.now(timezone.utc)).isoformat())
+        shown = await send(f"🎙 <i>{html.escape(result.transcript)}</i>", parse_mode=ParseMode.HTML,
+                           reply_markup=fix_keyboard(gid, lang))
+        if is_message_id(shown):
+            pending.set_voice_note_message(gid, shown.chat_id, shown.message_id)
+        note(voice_note=gid)
     if not result.expenses:
         note(outcome="no_expense")
         await send(t(lang, "no_expense"))
@@ -360,6 +399,8 @@ async def propose_to(send, user_id: int, result: extractor.ParseResult, source: 
             "source": source,
             "raw_input": raw_input,
         }
+        if gid:
+            payload["group"] = gid  # the transcript it came from, so a correction can withdraw it
         pid = pending.add(user_id, payload)
         pids.append(pid)
         proposals.append(
@@ -367,10 +408,92 @@ async def propose_to(send, user_id: int, result: extractor.ParseResult, source: 
                                      "category", "ai_category", "suggestion_source")}
         )
         shown = await send(proposal_text(payload, lang), parse_mode=ParseMode.HTML, reply_markup=confirm_keyboard(pid, lang))
-        if isinstance(getattr(shown, "message_id", None), int) and isinstance(getattr(shown, "chat_id", None), int):
+        if is_message_id(shown):
             pending.set_message(pid, shown.chat_id, shown.message_id)  # lets auto-save update it later
+    if gid:
+        pending.voice_note_counts(gid, proposed=len(pids))
     note(outcome="proposed", pending_ids=pids, proposals=proposals)
     return len(pids)
+
+
+# --------------------------------------------------------------------------- #
+# ✏️ Fix text: correcting a misheard transcript                                #
+# --------------------------------------------------------------------------- #
+
+
+@logged("button")
+async def handle_fix_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """✏️ Fix text under a 🎙 transcript: ask for the corrected text as a reply."""
+    query = update.callback_query
+    if not await allowed(update, context):
+        return
+    lang = ulang(update)
+    uid = query.from_user.id
+    gid = query.data.split(":", 1)[1]
+    vn = pending.voice_note(gid)
+    note(voice_note=gid)
+    if vn is None or vn["user_id"] != uid:
+        note(outcome="fix_gone")
+        await query.answer(t(lang, "fix_gone"), show_alert=True)
+        return
+    for pid, _, _ in pending.pending_in_group(uid, gid):
+        pending.touch(pid)  # they're fixing it: don't auto-save the misheard version meanwhile
+    await query.answer()
+    prompt = await update.effective_message.reply_text(
+        t(lang, "fix_prompt", text=html.escape(vn["transcript"])),
+        parse_mode=ParseMode.HTML,
+        reply_markup=ForceReply(selective=True, input_field_placeholder=t(lang, "fix_placeholder")),
+    )
+    if isinstance(getattr(prompt, "message_id", None), int):
+        pending.set_voice_note_prompt(gid, prompt.message_id)
+    note(outcome="fix_prompt")
+
+
+async def correct_transcript(update: Update, context: ContextTypes.DEFAULT_TYPE, vn: dict, text: str, lang: str):
+    """The corrected text arrived: withdraw what the misheard version proposed (unanswered ones),
+    show the correction on the 🎙 message, and propose again from the corrected text."""
+    uid, msg, gid = update.effective_user.id, update.effective_message, vn["gid"]
+    text = (text or "").strip()
+    note(voice_note=gid, transcript_fixed=True, original_transcript=vn["transcript"])
+    withdrawn = []
+    async with _save_lock:  # a ✅ tap on one of them can't slip in between
+        for pid, chat_id, message_id in pending.pending_in_group(uid, gid):
+            item = pending.pop(pid)
+            if item is not None:
+                withdrawn.append((item, chat_id, message_id))
+    for item, chat_id, message_id in withdrawn:
+        if chat_id and message_id:
+            try:
+                await context.bot.edit_message_text(
+                    f"<s>{fmt_item(item, lang)}</s>\n✖️ <i>{t(lang, 'fix_replaced')}</i>",
+                    chat_id=chat_id, message_id=message_id, parse_mode=ParseMode.HTML,
+                )
+            except Exception:
+                log.info("Couldn't mark a replaced proposal")
+    if vn["chat_id"] and vn["transcript_message_id"]:
+        try:
+            await context.bot.edit_message_text(
+                f"🎙 <s>{html.escape(vn['transcript'])}</s>\n✏️ <i>{html.escape(text)}</i>",
+                chat_id=vn["chat_id"], message_id=vn["transcript_message_id"], parse_mode=ParseMode.HTML,
+                reply_markup=fix_keyboard(gid, lang),
+            )
+        except Exception:
+            log.info("Couldn't update the transcript message")
+    pending.voice_note_fixed(gid, text)
+    if vn["saved"]:
+        await msg.reply_text(t(lang, "fix_already_saved", n=vn["saved"]))
+    await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
+    try:
+        result = await extractor.parse(
+            text=text, sent_at=datetime.fromisoformat(vn["sent_at"]), ctx=await mapping_context(lang)
+        )
+    except Exception as e:
+        log.exception("Parsing the corrected transcript failed")
+        note(outcome="parse_error", error=f"{type(e).__name__}: {e}"[:1000])
+        await msg.reply_text(t(lang, "parse_failed"))
+        return
+    note(withdrawn=len(withdrawn))
+    await propose_to(msg.reply_text, uid, result, vn["source"], raw_input=text, lang=lang, group=gid)
 
 
 # --------------------------------------------------------------------------- #
@@ -431,7 +554,8 @@ async def handle_upload(uid: int, audio: bytes | None, mime: str, text: str | No
             note(outcome="parse_error", error=f"{type(e).__name__}: {e}"[:1000])
             await send(t(lang, "voice_failed" if audio else "parse_failed"))
             raise
-        n = await propose_to(send, uid, result, source, raw_input=text or result.transcript, lang=lang)
+        n = await propose_to(send, uid, result, source, raw_input=text or result.transcript, lang=lang,
+                             sent_at=datetime.now(timezone.utc))
         return {"expenses": n, "transcript": result.transcript}
 
 
@@ -528,6 +652,8 @@ async def commit_expense(pid: str, category_id: int, category_name: str, lang: s
         row = build_row(item, category_id, category_name, confirmed_by)
         await warehouse.insert(row)
         pending.pop(pid)
+        if item.get("group"):
+            pending.voice_note_counts(item["group"], saved=1)
     if household.enabled and not context_flags.get("view_ready"):
         await asyncio.to_thread(household.ensure_view)
         context_flags["view_ready"] = True
@@ -1039,6 +1165,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = t(lang, "help_text", currency=currency, days=days)
     if config.AUTO_SAVE_MINUTES > 0:
         text += t(lang, "help_auto", minutes=f"{config.AUTO_SAVE_MINUTES:g}")
+    text += t(lang, "help_fix")
+    text += t(lang, "help_delete_line")
     text += t(lang, "help_household")
     markup = None
     if shortcut_available():
@@ -1162,7 +1290,18 @@ async def _report(update: Update, context: ContextTypes.DEFAULT_TYPE, period: st
         if not items:
             await update.effective_message.reply_text(t(lang, "nothing_yet", title=title))
             return
-        await send_long(update.effective_message, detailed_report(title, items, lang, multi_day=start != today))
+        uid = update.effective_user.id
+        index: list[tuple[int, str, str]] = []
+        text = detailed_report(title, items, lang, multi_day=start != today, index=index)
+        rid = secrets.token_hex(5)
+        sent = await send_long(update.effective_message, text, reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(t(lang, "btn_delete_line"), callback_data=f"rl:{rid}")]]
+        ))
+        pending.save_report(rid, uid, index)
+        for m in sent:
+            if is_message_id(m):
+                pending.add_report_message(rid, uid, m.chat_id, m.message_id)
+        note(report_id=rid)
         return
     note(outcome="report", report_mode=mode, period=period, period_start=str(start), period_end=str(today), rows=len(rows))
     if not rows:
@@ -1186,8 +1325,12 @@ def sum_by_currency(pairs) -> str:
     return " + ".join(fmt_money(v, k) for k, v in totals.items())
 
 
-def detailed_report(title: str, items: list[dict], lang: str, multi_day: bool) -> str:
-    """Every expense, newest first; grouped under day headings when the period spans several days."""
+def detailed_report(title: str, items: list[dict], lang: str, multi_day: bool,
+                    index: list[tuple[int, str, str]] | None = None) -> str:
+    """Every expense, newest first, numbered 1, 2, 3… across the whole report (the number is what
+    🗑 Delete a line asks for); grouped under day headings when the period spans several days.
+    `index` collects (number, expense_id, plain-text line) for each line."""
+    n = 0
     lines = [f"<b>{title}</b> — {sum_by_currency((i['amount'], i['currency']) for i in items)}"]
     by_day: dict[date, list[dict]] = {}
     for i in items:
@@ -1200,22 +1343,149 @@ def detailed_report(title: str, items: list[dict], lang: str, multi_day: bool) -
             name = (i.get("item_label") if lang != i18n.DEFAULT_LANGUAGE else None) or i.get("description") or "—"
             merchant = f" ({html.escape(i['merchant'])})" if i.get("merchant") else ""
             cat = category_label(i.get("category_id"), i.get("category") or "", lang)
+            n += 1
             lines.append(
-                f"• {fmt_money(i['amount'], i['currency'])} · {html.escape(name)}{merchant} — <i>{html.escape(cat)}</i>"
+                f"<b>{n}.</b> {fmt_money(i['amount'], i['currency'])} · {html.escape(name)}{merchant} — <i>{html.escape(cat)}</i>"
             )
+            if index is not None and i.get("expense_id"):
+                plain_merchant = f" ({i['merchant']})" if i.get("merchant") else ""
+                index.append((n, i["expense_id"],
+                              f"{fmt_day(day, lang)} · {fmt_money(i['amount'], i['currency'])} · {name}{plain_merchant} — {cat}"))
     return "\n".join(lines)
 
 
-async def send_long(msg, text: str, limit: int = 4000):
-    """Telegram caps a message at 4096 characters: split on line breaks, never inside a line's tags."""
-    chunk = ""
+async def send_long(msg, text: str, limit: int = 4000, reply_markup=None) -> list:
+    """Telegram caps a message at 4096 characters: split on line breaks, never inside a line's tags.
+    `reply_markup` goes on the last part. Returns the messages sent."""
+    sent, chunk = [], ""
     for line in text.split("\n"):
         if chunk and len(chunk) + len(line) + 1 > limit:
-            await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
+            sent.append(await msg.reply_text(chunk, parse_mode=ParseMode.HTML))
             chunk = ""
         chunk = f"{chunk}\n{line}" if chunk else line
     if chunk:
-        await msg.reply_text(chunk, parse_mode=ParseMode.HTML)
+        sent.append(await msg.reply_text(chunk, parse_mode=ParseMode.HTML, reply_markup=reply_markup))
+    return sent
+
+
+# ---- 🗑 Delete a line (detailed reports) ---------------------------------- #
+
+MAX_LINES_PER_DELETE = 10  # keeps the confirm button's data under Telegram's 64 bytes
+
+
+@logged("button")
+async def handle_report_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """rl:<report>  -> ask which line;   rx:<report>:<n,n>  -> delete them;   rx:no -> cancel."""
+    query = update.callback_query
+    if not await allowed(update, context):
+        return
+    lang = ulang(update)
+    uid = query.from_user.id
+    parts = query.data.split(":")
+    if query.data == "rx:no":
+        note(outcome="delete_lines_cancelled")
+        await query.answer()
+        await query.edit_message_text(t(lang, "dl_cancelled"))
+        return
+    rid = parts[1]
+    rows = pending.report_rows(rid, uid)
+    note(report_id=rid)
+    if not rows:
+        note(outcome="report_gone")
+        await query.answer(t(lang, "dl_gone"), show_alert=True)
+        return
+    if parts[0] == "rl":
+        await query.answer()
+        prompt = await update.effective_message.reply_text(
+            t(lang, "dl_prompt", n=max(rows)),
+            reply_markup=ForceReply(selective=True, input_field_placeholder=t(lang, "dl_placeholder")),
+        )
+        if isinstance(getattr(prompt, "message_id", None), int):
+            pending.add_report_message(rid, uid, update.effective_chat.id, prompt.message_id)
+        note(outcome="delete_lines_prompt")
+        return
+    # rx:<rid>:<numbers> - confirmed
+    await query.answer()
+    numbers = [int(x) for x in parts[2].split(",") if x.isdigit()] if len(parts) > 2 else []
+    deleted, gone = [], []
+    for n in numbers:
+        row = rows.get(n)
+        if row is None:
+            continue
+        if row["deleted"]:
+            gone.append(n)
+            continue
+        try:
+            removed = await warehouse.delete(row["expense_id"], uid)
+        except Exception as e:
+            log.exception("Deleting a line failed")
+            note(outcome="delete_lines_error", error=f"{type(e).__name__}: {e}"[:1000])
+            key = "undo_sandbox" if "DML" in str(e) or "billing" in str(e).lower() else "dl_failed"
+            await update.effective_message.reply_text(t(lang, key))
+            break
+        pending.mark_expense_deleted(row["expense_id"])
+        if not removed:  # already gone (e.g. ↩️ Undo)
+            gone.append(n)
+            continue
+        deleted.append(row)
+        await forget_save(context, row["expense_id"], lang)
+    note(outcome="lines_deleted", lines=[r["idx"] for r in deleted], expense_ids=[r["expense_id"] for r in deleted],
+         already_gone=gone)
+    text = t(lang, "dl_done", lines="\n".join(f"{r['idx']}. {r['summary']}" for r in deleted)) if deleted else ""
+    if gone:
+        text += ("\n\n" if text else "") + t(lang, "dl_already", lines=", ".join(map(str, gone)))
+    await query.edit_message_text(text or t(lang, "dl_cancelled"))
+
+
+async def forget_save(context: ContextTypes.DEFAULT_TYPE, expense_id: str, lang: str):
+    """After deleting a saved expense: undo what it taught the dictionary and strike out its proposal,
+    exactly like ↩️ Undo (when its save history is still on this machine)."""
+    saved = pending.saved_entry(expense_id)
+    if saved is None:
+        return
+    chat_id, message_id, summary, learned = saved
+    pending.forget_saved(expense_id)
+    if learned:
+        try:
+            await catalog.unlearn(learned["keys"], learned["category_id"], learned["corrected"])
+        except Exception:
+            log.exception("Dictionary rollback failed")
+    try:
+        await context.bot.edit_message_text(
+            f"<s>{html.escape(summary)}</s>\n{t(lang, 'undone_line')}",
+            chat_id=chat_id, message_id=message_id, parse_mode=ParseMode.HTML,
+        )
+    except Exception:
+        pass  # too old to edit
+
+
+async def ask_delete_lines(update: Update, rid: str, text: str, lang: str):
+    """A reply to a detailed report (or to its "which line?" prompt) with line numbers: confirm first."""
+    uid, msg = update.effective_user.id, update.effective_message
+    rows = pending.report_rows(rid, uid)
+    note(report_id=rid)
+    if not rows:
+        note(outcome="report_gone")
+        await msg.reply_text(t(lang, "dl_gone"))
+        return
+    wanted = list(dict.fromkeys(int(x) for x in re.findall(r"\d+", text or "")))
+    if not wanted or any(n not in rows for n in wanted) or len(wanted) > MAX_LINES_PER_DELETE:
+        note(outcome="delete_lines_bad_input")
+        await msg.reply_text(t(lang, "dl_bad", n=max(rows), max=MAX_LINES_PER_DELETE))
+        return
+    live = [n for n in wanted if not rows[n]["deleted"]]
+    if not live:
+        note(outcome="already_deleted")
+        await msg.reply_text(t(lang, "dl_already", lines=", ".join(map(str, wanted))))
+        return
+    note(outcome="delete_lines_confirm", lines=live)
+    await msg.reply_text(
+        t(lang, "dl_confirm", lines="\n".join(f"{n}. {rows[n]['summary']}" for n in live)),
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton(t(lang, "btn_dl_yes", n=len(live)), callback_data=f"rx:{rid}:{','.join(map(str, live))}"),
+            InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="rx:no"),
+        ]]),
+    )
 
 
 @logged("command")
@@ -1799,9 +2069,37 @@ async def handle_other(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(t(ulang(update), "unsupported"))
 
 
+_network = {"down_since": None, "warned_at": 0.0}
+NETWORK_WARN_EVERY = 600  # seconds between "still can't reach Telegram" lines
+
+
+def network_back():
+    """Called on the first update after an outage: one line saying how long it lasted."""
+    since = _network["down_since"]
+    if since is not None:
+        _network["down_since"] = None
+        secs = int((datetime.now(timezone.utc) - since).total_seconds())
+        log.info("Telegram reachable again after %s", f"{secs // 60} min {secs % 60} s" if secs >= 60 else f"{secs} s")
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
     """Last line of defence: log the crash (the interaction row already has the traceback) and tell the user."""
-    log.error("Unhandled error", exc_info=context.error)
+    err = context.error
+    if update is None and isinstance(err, (NetworkError, TimedOut)) and not isinstance(err, BadRequest):
+        # Fetching updates failed: no internet, Mac asleep, Telegram hiccup. The library keeps retrying
+        # and Telegram holds messages for 24 h, so this is a warning, not a crash.
+        now = time.monotonic()
+        if _network["down_since"] is None:
+            _network["down_since"] = datetime.now(timezone.utc)
+            _network["warned_at"] = now
+            log.warning("Can't reach Telegram (%s). Retrying automatically; messages wait on Telegram's side.",
+                        f"{type(err).__name__}: {err}".strip(": "))
+        elif now - _network["warned_at"] >= NETWORK_WARN_EVERY:
+            _network["warned_at"] = now
+            log.warning("Still can't reach Telegram (since %s UTC). Check the Mac's internet connection.",
+                        f"{_network['down_since']:%H:%M}")
+        return
+    log.error("Unhandled error", exc_info=err)
     try:
         if isinstance(update, Update):
             try:
@@ -1875,9 +2173,10 @@ async def _post_shutdown(app: Application):
         task = app.bot_data.get(name)
         if task:
             task.cancel()
-    runner = app.bot_data.get("ingest_runner")
-    if runner:
-        await runner.cleanup()
+    for name in ("ingest_runner", "dashboard_runner"):
+        runner = app.bot_data.get(name)
+        if runner:
+            await runner.cleanup()
     await interaction_log.close()
 
 
@@ -1930,6 +2229,8 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern=r"^del:"))
     app.add_handler(CallbackQueryHandler(handle_shortcut_button, pattern=r"^sc:"))
     app.add_handler(CallbackQueryHandler(handle_dashboard_button, pattern=r"^dash:"))
+    app.add_handler(CallbackQueryHandler(handle_fix_button, pattern=r"^fx:"))
+    app.add_handler(CallbackQueryHandler(handle_report_button, pattern=r"^r[lx]:"))
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_handler(MessageHandler(new & filters.COMMAND, cmd_unknown))
     app.add_handler(MessageHandler(new & ~filters.StatusUpdate.ALL, handle_other))

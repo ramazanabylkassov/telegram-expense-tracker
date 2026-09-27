@@ -292,6 +292,55 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "\n⏱ Нет ответа {minutes} мин? Расход сохранится с предложенной категорией.",
     },
     "auto_saved": {"en": "auto-saved", "ru": "сохранено автоматически"},
+    "btn_fix_text": {"en": "✏️ Fix text", "ru": "✏️ Исправить текст"},
+    "btn_delete_line": {"en": "🗑 Delete a line", "ru": "🗑 Удалить строку"},
+    "dl_prompt": {
+        "en": "🗑 Which line should I delete? Reply with its number (1–{n}). Several at once: 3, 5",
+        "ru": "🗑 Какую строку удалить? Ответьте её номером (1–{n}). Несколько сразу: 3, 5",
+    },
+    "dl_placeholder": {"en": "Line number", "ru": "Номер строки"},
+    "dl_bad": {
+        "en": "Send line numbers from the report, 1–{n} (up to {max} at once), e.g. 3 or 3, 5",
+        "ru": "Отправьте номера строк из отчёта, 1–{n} (не больше {max} за раз), например 3 или 3, 5",
+    },
+    "dl_confirm": {"en": "Delete for good?\n\n{lines}", "ru": "Удалить навсегда?\n\n{lines}"},
+    "btn_dl_yes": {"en": "🗑 Delete ({n})", "ru": "🗑 Удалить ({n})"},
+    "dl_done": {
+        "en": "🗑 Deleted:\n{lines}\n\nOpen the report again to see the new totals.",
+        "ru": "🗑 Удалено:\n{lines}\n\nОткройте отчёт заново, чтобы увидеть новые итоги.",
+    },
+    "dl_already": {"en": "Already deleted: line {lines}.", "ru": "Уже удалено: строка {lines}."},
+    "dl_cancelled": {"en": "OK, nothing deleted.", "ru": "Хорошо, ничего не удалено."},
+    "dl_gone": {
+        "en": "This report is too old to delete from. Open it again and pick the line there.",
+        "ru": "Из этого отчёта уже нельзя удалять. Откройте его заново и выберите строку там.",
+    },
+    "dl_failed": {
+        "en": "⚠️ Couldn't delete right now. Try again in a minute.",
+        "ru": "⚠️ Не удалось удалить. Попробуйте через минуту.",
+    },
+    "help_delete_line": {
+        "en": "\n🗑 Wrong entry anywhere? In the 🧾 detailed report every line has a number: tap 🗑 Delete a line and send the number.",
+        "ru": "\n🗑 Ошибка в любой записи? В 🧾 подробном отчёте у каждой строки есть номер: нажмите 🗑 Удалить строку и отправьте номер.",
+    },
+    "fix_prompt": {
+        "en": "✏️ Send the corrected text as a reply to this message. What I heard (tap to copy):\n<code>{text}</code>",
+        "ru": "✏️ Отправьте исправленный текст ответом на это сообщение. Что я услышал (нажмите, чтобы скопировать):\n<code>{text}</code>",
+    },
+    "fix_placeholder": {"en": "Corrected text", "ru": "Исправленный текст"},
+    "fix_replaced": {"en": "replaced by the corrected text", "ru": "заменено исправленным текстом"},
+    "fix_already_saved": {
+        "en": "Note: {n} expense(s) from the original recording were already saved and stay saved. If they're wrong, ↩️ Undo removes the last one.",
+        "ru": "Обратите внимание: {n} расход(ов) из исходной записи уже сохранены и останутся. Если они неверны, ↩️ Отменить удалит последний.",
+    },
+    "fix_gone": {
+        "en": "This recording is too old to fix. Just send the expense again.",
+        "ru": "Эту запись уже нельзя исправить. Просто отправьте расход заново.",
+    },
+    "help_fix": {
+        "en": "\n✏️ Voice misheard? Tap ✏️ Fix text under the transcript (or reply to it) with the right words.",
+        "ru": "\n✏️ Голос распознан неверно? Нажмите ✏️ Исправить текст под расшифровкой (или ответьте на неё) и напишите правильно.",
+    },
     "m_shortcut": {"en": "📲 Action Button", "ru": "📲 Кнопка действия"},
     "sc_title": {
         "en": "📲 <b>Log expenses with the iPhone Action Button</b>\nPress it, say what you spent, tap to stop. The proposal arrives here as usual.",

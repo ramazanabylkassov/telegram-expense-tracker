@@ -19,7 +19,21 @@ Category: Shopping? (🤖 guess)            ← model's guess, nothing known yet
 
 **No answer for 10 minutes?** The bot saves the expense with its suggested category and edits the message to `✅ Eating out · auto-saved`. Tapping ✏️ restarts the 10 minutes, so you won't lose it mid-pick. Auto-saved rows get `confirmed_by = 'auto'` in BigQuery, and they don't teach the dictionary (only your own taps do). `/undo` works on them as usual. Change the delay with `AUTO_SAVE_MINUTES` in `.env` (`0` turns it off).
 
+**Voice misheard?** Every 🎙 transcript, from Telegram voice notes and Action Button uploads alike, has a **✏️ Fix text** button. Tapping it opens a reply with the transcript ready to copy; send the corrected text back. Replying directly to the 🎙 message works the same way. The bot then:
+- withdraws the proposals from the misheard version that are still unanswered (marked "✖️ replaced by the corrected text");
+- updates the 🎙 message to show old → new;
+- reads the corrected text again, dated by when the recording was sent (so "yesterday" stays right).
+
+Proposals already saved stay saved, and the bot says so, so you can ↩️ Undo them. Tapping Fix also restarts their auto-save clock. A transcript can be corrected for 7 days and more than once. A correction counts as one text message towards the daily limit. Transcripts are kept locally in `pending.sqlite3` (`voice_notes`) for that week and removed by 🗑 Delete my data. In `log_interactions` a correction is a text row with `details.transcript_fixed = true` and the `original_transcript`.
+
 **Report view** — the 📊 / 🧾 button under Today · Week · Month switches *your* reports between totals by category and a detailed list of every expense (grouped by day), and stays that way until you tap it again.
+
+**Delete any line:** in the 🧾 detailed view every expense is numbered (1, 2, 3… across the whole report). **🗑 Delete a line** under the report asks for the number. Reply with it (several at once: `3, 5`), or just reply to the report with the numbers. The bot shows those lines and asks to confirm. Deleting works like ↩️ Undo for any line:
+- the row is removed from BigQuery;
+- what that save taught the dictionary is rolled back (when the save's history is still on the Mac);
+- the original proposal message is struck out.
+
+No AI call is involved, so it doesn't count towards the daily limits. Numbers always refer to the report they came from, so a stale number can't hit the wrong expense, and a line deleted in one report shows as deleted in the others. Reports can be used this way for 7 days (stored in `pending.sqlite3`: `report_rows`, `report_messages`).
 
 `/start` shows a button menu (📅 Today · 📆 Week · 🗓 Month · ↩️ Undo last · 🏷 Categories · 🔄 Reload · 🏠 Household, plus 👨‍👩‍👧 Family totals when you're in a household and 👥 Users for the owner). Tapping a button runs the command, and the menu stays in place.
 
