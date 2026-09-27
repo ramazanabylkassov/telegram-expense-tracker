@@ -1,0 +1,762 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Expense bot monitor</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #6f6d68;
+  --axis-text: #898781;
+  --grid: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --wash: rgba(11, 11, 11, 0.04);
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --good: #0ca30c;
+  --good-text: #006300;
+  --warning: #fab219;
+  --critical: #d03b3b;
+  --critical-text: #b42828;
+  --radius: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #a3a197;
+    --axis-text: #898781;
+    --grid: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --wash: rgba(255, 255, 255, 0.05);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --good-text: #0ca30c;
+    --critical-text: #ff7b7b;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --text-primary: #ffffff; --text-secondary: #c3c2b7;
+  --text-muted: #a3a197; --axis-text: #898781; --grid: #2c2c2a; --baseline: #383835;
+  --border: rgba(255, 255, 255, 0.10); --wash: rgba(255, 255, 255, 0.05);
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500;
+  --good-text: #0ca30c; --critical-text: #ff7b7b;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--page);
+  color: var(--text-primary);
+  font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+.wrap { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; }
+header.top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin-bottom: 16px; }
+header.top h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: -0.01em; }
+header.top .sub { color: var(--text-muted); font-size: 13px; }
+.spacer { flex: 1; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--surface); font-size: 13px; color: var(--text-secondary);
+}
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); }
+.pill.warn .dot { background: var(--warning); }
+.pill.bad .dot { background: var(--critical); }
+button, .btn {
+  font: inherit; font-size: 13px; color: var(--text-primary); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; cursor: pointer; text-decoration: none;
+}
+button:hover, .btn:hover { background: var(--wash); }
+button:focus-visible, .btn:focus-visible, [tabindex]:focus-visible, summary:focus-visible, input:focus-visible + label {
+  outline: 2px solid var(--series-1); outline-offset: 2px;
+}
+
+.filters { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 20px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); padding: 3px; }
+.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label { padding: 5px 12px; border-radius: 7px; cursor: pointer; font-size: 13px; color: var(--text-secondary); }
+.seg label:hover { background: var(--wash); }
+.seg input:checked + label { background: var(--text-primary); color: var(--surface); font-weight: 600; }
+.filters .note { color: var(--text-muted); font-size: 13px; }
+
+section { margin-bottom: 28px; }
+section > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); font-weight: 600; margin: 0 0 10px; }
+.card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px;
+  min-width: 0;
+}
+.card h3 { margin: 0 0 2px; font-size: 15px; font-weight: 600; }
+.card .desc { margin: 0 0 12px; color: var(--text-muted); font-size: 13px; }
+
+.tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.tile .label { color: var(--text-secondary); font-size: 13px; }
+.tile .value { font-size: 28px; font-weight: 650; letter-spacing: -0.02em; margin: 2px 0; }
+.tile .value small { font-size: 15px; font-weight: 500; color: var(--text-secondary); margin-left: 2px; }
+.tile .delta { font-size: 12.5px; color: var(--text-muted); }
+.delta .up-good, .delta .down-good { color: var(--good-text); font-weight: 600; }
+.delta .up-bad, .delta .down-bad { color: var(--critical-text); font-weight: 600; }
+
+.grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.span2 { grid-column: 1 / -1; }
+.chart { position: relative; width: 100%; }
+.chart svg { display: block; width: 100%; overflow: visible; }
+.chart svg:focus { outline: none; }
+.chart svg:focus-visible { outline: 2px solid var(--series-1); outline-offset: 4px; border-radius: 4px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0 0 8px; font-size: 13px; color: var(--text-secondary); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; }
+.legend i.line { height: 2px; width: 14px; border-radius: 1px; }
+.tooltip {
+  position: absolute; pointer-events: none; z-index: 5; min-width: 120px; padding: 8px 10px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12); font-size: 12.5px; opacity: 0; transition: opacity 80ms;
+}
+.tooltip.on { opacity: 1; }
+.tooltip .t { color: var(--text-muted); margin-bottom: 4px; }
+.tooltip .row { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.tooltip .row b { font-weight: 650; color: var(--text-primary); min-width: 2.5em; text-align: right; font-variant-numeric: tabular-nums; }
+.tooltip .row span { color: var(--text-secondary); }
+.tooltip .key { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+details.tbl { margin-top: 10px; }
+details.tbl summary { cursor: pointer; color: var(--text-muted); font-size: 12.5px; }
+
+.tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { color: var(--text-muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+td .muted { color: var(--text-muted); }
+.minibar { display: inline-block; height: 8px; border-radius: 0 4px 4px 0; background: var(--series-1); vertical-align: middle; margin-right: 6px; }
+.badge { display: inline-block; font-size: 11.5px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-secondary); white-space: nowrap; }
+.err { color: var(--critical-text); }
+.errmsg { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--text-secondary); word-break: break-word; }
+
+.health { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 24px; }
+.health div { display: flex; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--grid); font-size: 13.5px; }
+.health.one { grid-template-columns: minmax(0, 1fr); margin: 0; }
+.health dt { color: var(--text-secondary); }
+.health dd { margin: 0; text-align: right; font-weight: 550; }
+.flag-warn::before { content: "⚠ "; color: var(--warning); }
+.flag-bad::before { content: "⚠ "; color: var(--critical); }
+
+.outcomes .bar { display: flex; gap: 2px; height: 22px; margin: 6px 0 12px; }
+.outcomes .bar div { height: 100%; min-width: 2px; }
+.outcomes .bar div:first-child { border-radius: 4px 0 0 4px; }
+.outcomes .bar div:last-child { border-radius: 0 4px 4px 0; }
+.outcomes .bar div:only-child { border-radius: 4px; }
+.outcomes .bar div:hover, .outcomes .bar div:focus-visible { filter: brightness(1.12); outline: none; }
+.outcomes .legend b { color: var(--text-primary); font-weight: 650; }
+
+.section-error { color: var(--critical-text); font-size: 13px; }
+.empty { color: var(--text-muted); font-size: 13.5px; padding: 12px 0; }
+.loading main { opacity: 0.55; transition: opacity 120ms; }
+.signedout { max-width: 30rem; margin: 20vh auto; text-align: center; color: var(--text-secondary); }
+
+@media (max-width: 900px) {
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid2 { grid-template-columns: minmax(0, 1fr); }
+  .health { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 420px) {
+  .tile .value { font-size: 24px; }
+  .seg label { padding: 5px 9px; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>📊 Expense bot</h1>
+      <div class="sub" id="updated">Loading…</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="actions">
+      <span class="pill" id="status" role="status"><span class="dot"></span><span id="status-text">Checking…</span></span>
+      <button id="refresh" type="button" title="Refresh now">↻ Refresh</button>
+      <a class="btn" href="/dashboard/logout">Sign out</a>
+    </div>
+  </header>
+
+  <div class="filters" role="group" aria-label="Period">
+    <div class="seg">
+      <input type="radio" name="days" id="d1" value="1"><label for="d1">24 hours</label>
+      <input type="radio" name="days" id="d7" value="7"><label for="d7">7 days</label>
+      <input type="radio" name="days" id="d30" value="30"><label for="d30">30 days</label>
+      <input type="radio" name="days" id="d90" value="90"><label for="d90">90 days</label>
+    </div>
+    <span class="note" id="period-note"></span>
+  </div>
+
+  <main id="main">
+    <section>
+      <h2>Overview</h2>
+      <div class="tiles" id="tiles"></div>
+    </section>
+
+    <section>
+      <h2>Activity</h2>
+      <div class="grid2">
+        <div class="card">
+          <h3>Messages to the AI</h3>
+          <p class="desc">Texts, voice notes and Action Button uploads the bot read</p>
+          <div id="c-messages"></div>
+        </div>
+        <div class="card">
+          <h3>Active users</h3>
+          <p class="desc">People who did anything in the bot</p>
+          <div id="c-users"></div>
+        </div>
+        <div class="card outcomes">
+          <h3>What happens to proposals</h3>
+          <p class="desc">Every expense the bot proposed and was answered in this period</p>
+          <div id="c-outcomes"></div>
+        </div>
+        <div class="card">
+          <h3>⚠ Errors</h3>
+          <p class="desc">Failed AI calls, saves and reports</p>
+          <div id="c-errors"></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Quality</h2>
+      <div class="grid2">
+        <div class="card span2">
+          <h3>Categories</h3>
+          <p class="desc">Saved expenses by category. <b>Changed</b> = the person picked another category than suggested; <b>from dictionary</b> = the suggestion came from confirmed spends, not the AI.</p>
+          <div id="t-categories"></div>
+        </div>
+        <div class="card">
+          <h3>Response time</h3>
+          <p class="desc">From receiving a message to showing the proposal</p>
+          <div id="t-latency"></div>
+        </div>
+        <div class="card">
+          <h3>Dictionary &amp; limits</h3>
+          <p class="desc">The shared spend dictionary and today's usage</p>
+          <dl class="health one" id="t-dict"></dl>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Users</h2>
+      <div class="card">
+        <p class="desc" id="users-desc">Everyone active in this period, most active first</p>
+        <div id="t-users"></div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Recent errors</h2>
+      <div class="card"><div id="t-errors"></div></div>
+    </section>
+
+    <section>
+      <h2>Bot health &amp; settings</h2>
+      <div class="card"><dl class="health" id="health"></dl></div>
+    </section>
+  </main>
+</div>
+
+<script>
+"use strict";
+const $ = (s) => document.querySelector(s);
+const nf = new Intl.NumberFormat("en-US");
+let TZ = "UTC";  // replaced by the bot's TIMEZONE on the first load
+let DAYS = 7, DATA = null, timer = null;
+
+/* ---------- tiny DOM helper: text always via textContent ---------- */
+function el(tag, attrs, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v == null || v === false) continue;
+    if (k === "class") n.className = v;
+    else if (k === "style") n.style.cssText = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of kids.flat()) {
+    if (c == null || c === false) continue;
+    n.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return n;
+}
+const SVGNS = "http://www.w3.org/2000/svg";
+function s(tag, attrs) {
+  const n = document.createElementNS(SVGNS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) if (v != null) n.setAttribute(k, v);
+  return n;
+}
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+/* ---------- formatting ---------- */
+function compact(n) {
+  if (n == null || isNaN(n)) return "–";
+  if (Math.abs(n) >= 10000) return new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 }).format(n);
+  return nf.format(Math.round(n));
+}
+function pct(a, b, digits = 0) { return b ? (100 * a / b).toFixed(digits) + "%" : "–"; }
+function secs(ms) { return ms == null ? "–" : ms < 1000 ? ms + " ms" : (ms / 1000).toFixed(ms < 10000 ? 1 : 0) + " s"; }
+function ago(iso) {
+  if (!iso) return "never";
+  const s = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " d ago";
+}
+function duration(fromIso) {
+  const s = (Date.now() - new Date(fromIso).getTime()) / 1000;
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d} d ${h} h` : h ? `${h} h ${m} min` : `${m} min`;
+}
+function when(iso) {
+  return new Date(iso).toLocaleString("en-GB", { timeZone: TZ, day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+function bucketLabel(t, unit, long) {
+  const [d, time] = t.split("T");
+  const dt = new Date(d + "T00:00:00Z");
+  const day = dt.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", ...(long ? { weekday: "short" } : {}) });
+  return unit === "hour" ? (long ? `${day}, ${time.slice(0, 5)}` : time.slice(0, 5)) : day;
+}
+function periodName(days) { return days === 1 ? "previous 24 h" : `previous ${days} days`; }
+
+/* ---------- tooltip ---------- */
+function tooltipFor(container) {
+  let tip = container.querySelector(".tooltip");
+  if (!tip) { tip = el("div", { class: "tooltip", role: "tooltip" }); container.append(tip); }
+  return {
+    show(x, y, title, rows) {
+      tip.replaceChildren(el("div", { class: "t" }, title),
+        ...rows.map((r) => el("div", { class: "row" },
+          el("i", { class: "key", style: `background:${r.color}` }), el("b", {}, r.value), el("span", {}, r.label))));
+      tip.classList.add("on");
+      const w = container.clientWidth, tw = tip.offsetWidth;
+      tip.style.left = Math.max(0, Math.min(w - tw, x + 12)) + "px";
+      tip.style.top = Math.max(0, y - tip.offsetHeight - 8) + "px";
+    },
+    hide() { tip.classList.remove("on"); },
+  };
+}
+
+/* ---------- axis helpers ---------- */
+function niceMax(v) {
+  // top of the axis = 4 clean steps (1, 2, 2.5, 5 × 10^n), so every tick is a round number
+  const raw = Math.max(1, v) / 4, p = Math.pow(10, Math.floor(Math.log10(raw))), m = raw / p;
+  const step = (m <= 1 ? 1 : m <= 2 ? 2 : m <= 2.5 && p >= 10 ? 2.5 : m <= 5 ? 5 : 10) * p;
+  return Math.max(4, step * 4);
+}
+function labelEvery(n, width) { return Math.max(1, Math.ceil(n / Math.max(2, Math.floor(width / 56)))); }
+
+function tableView(headers, rows) {
+  return el("details", { class: "tbl" }, el("summary", {}, "Show as table"),
+    el("div", { class: "tablewrap" }, el("table", {},
+      el("thead", {}, el("tr", {}, headers.map((h, i) => el("th", { class: i ? "num" : null }, h)))),
+      el("tbody", {}, rows.map((r) => el("tr", {}, r.map((c, i) => el("td", { class: i ? "num" : null }, c))))))));
+}
+
+/* ---------- column chart (stacked when several series) ---------- */
+function columnChart(host, points, unit, series) {
+  host.replaceChildren();
+  const multi = series.length > 1;
+  if (multi) host.append(el("div", { class: "legend" }, series.map((sr) => el("span", {}, el("i", { style: `background:var(${sr.color})` }), sr.label))));
+  const box = el("div", { class: "chart" }); host.append(box);
+  const W = Math.max(280, box.clientWidth || host.clientWidth), H = 190, L = 34, R = 6, T = 10, B = 24;
+  const pw = W - L - R, ph = H - T - B, n = points.length;
+  const totals = points.map((p) => series.reduce((a, sr) => a + (p[sr.key] || 0), 0));
+  const max = niceMax(Math.max(1, ...totals));
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, height: H, tabindex: 0, role: "img",
+    "aria-label": `${series.map((x) => x.label).join(", ")} per ${unit}` });
+  const y = (v) => T + ph - (v / max) * ph;
+  for (let i = 0; i <= 4; i++) {
+    const v = (max / 4) * i, yy = y(v);
+    svg.append(s("line", { x1: L, x2: W - R, y1: yy, y2: yy, stroke: i ? "var(--grid)" : "var(--baseline)", "stroke-width": 1 }));
+    const t = s("text", { x: L - 6, y: yy + 4, "text-anchor": "end", "font-size": 11, fill: "var(--axis-text)" });
+    t.textContent = compact(v); svg.append(t);
+  }
+  const band = pw / n, bw = Math.max(2, Math.min(24, band * 0.62)), every = labelEvery(n, pw);
+  points.forEach((p, i) => {
+    const cx = L + band * i + band / 2;
+    let base = 0;
+    const segs = series.map((sr) => ({ sr, v: p[sr.key] || 0 })).filter((x) => x.v > 0);
+    segs.forEach((sg, j) => {
+      const top = j === segs.length - 1, y0 = y(base), y1 = y(base + sg.v);
+      const gap = j > 0 ? 2 : 0, h = Math.max(1, y0 - y1 - gap), x0 = cx - bw / 2, r = top ? Math.min(4, h, bw / 2) : 0;
+      const yTop = y0 - gap - h;
+      const d = `M${x0},${y0 - gap} V${yTop + r} Q${x0},${yTop} ${x0 + r},${yTop} H${x0 + bw - r} Q${x0 + bw},${yTop} ${x0 + bw},${yTop + r} V${y0 - gap} Z`;
+      svg.append(s("path", { d, fill: `var(${sg.sr.color})` }));
+      base += sg.v;
+    });
+    if (i % every === 0 || i === n - 1 && n < 10) {
+      const t = s("text", { x: cx, y: H - 6, "text-anchor": "middle", "font-size": 11, fill: "var(--axis-text)" });
+      t.textContent = bucketLabel(p.t, unit, false); svg.append(t);
+    }
+  });
+  const hl = s("rect", { y: T, height: ph, width: band, fill: "var(--wash)", opacity: 0 }); svg.prepend(hl);
+  box.append(svg);
+  const tip = tooltipFor(box);
+  let cur = -1;
+  const show = (i) => {
+    cur = Math.max(0, Math.min(n - 1, i));
+    const p = points[cur], cx = L + band * cur + band / 2;
+    hl.setAttribute("x", L + band * cur); hl.setAttribute("opacity", 1);
+    const rows = series.slice().reverse().map((sr) => ({ color: `var(${sr.color})`, value: nf.format(p[sr.key] || 0), label: sr.label }));
+    if (multi) rows.push({ color: "transparent", value: nf.format(totals[cur]), label: "total" });
+    tip.show((cx / W) * box.clientWidth, (y(totals[cur]) / H) * svg.clientHeight, bucketLabel(p.t, unit, true), rows);
+  };
+  const hide = () => { hl.setAttribute("opacity", 0); tip.hide(); };
+  svg.addEventListener("pointermove", (e) => {
+    const r = svg.getBoundingClientRect(), x = ((e.clientX - r.left) / r.width) * W;
+    show(Math.floor((x - L) / band));
+  });
+  svg.addEventListener("pointerleave", hide);
+  svg.addEventListener("focus", () => show(cur < 0 ? n - 1 : cur));
+  svg.addEventListener("blur", hide);
+  svg.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); show(cur + (e.key === "ArrowLeft" ? -1 : 1)); }
+  });
+  host.append(tableView([unit === "hour" ? "Hour" : "Day", ...series.map((x) => x.label), ...(multi ? ["Total"] : [])],
+    points.map((p, i) => [bucketLabel(p.t, unit, true), ...series.map((x) => nf.format(p[x.key] || 0)), ...(multi ? [nf.format(totals[i])] : [])])));
+}
+
+/* ---------- line chart (one series, crosshair) ---------- */
+function lineChart(host, points, unit, sr) {
+  host.replaceChildren();
+  const box = el("div", { class: "chart" }); host.append(box);
+  const W = Math.max(280, box.clientWidth || host.clientWidth), H = 190, L = 34, R = 34, T = 12, B = 24;
+  const pw = W - L - R, ph = H - T - B, n = points.length;
+  const vals = points.map((p) => p[sr.key] || 0), max = niceMax(Math.max(1, ...vals));
+  const x = (i) => L + (n === 1 ? pw / 2 : (pw * i) / (n - 1)), y = (v) => T + ph - (v / max) * ph;
+  const svg = s("svg", { viewBox: `0 0 ${W} ${H}`, height: H, tabindex: 0, role: "img", "aria-label": `${sr.label} per ${unit}` });
+  for (let i = 0; i <= 4; i++) {
+    const v = (max / 4) * i, yy = y(v);
+    svg.append(s("line", { x1: L, x2: W - R, y1: yy, y2: yy, stroke: i ? "var(--grid)" : "var(--baseline)", "stroke-width": 1 }));
+    const t = s("text", { x: L - 6, y: yy + 4, "text-anchor": "end", "font-size": 11, fill: "var(--axis-text)" });
+    t.textContent = compact(v); svg.append(t);
+  }
+  const line = vals.map((v, i) => `${i ? "L" : "M"}${x(i)},${y(v)}`).join(" ");
+  svg.append(s("path", { d: `${line} L${x(n - 1)},${y(0)} L${x(0)},${y(0)} Z`, fill: `var(${sr.color})`, opacity: 0.1 }));
+  svg.append(s("path", { d: line, fill: "none", stroke: `var(${sr.color})`, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round" }));
+  const every = labelEvery(n, pw);
+  points.forEach((p, i) => {
+    if (i % every) return;
+    const t = s("text", { x: x(i), y: H - 6, "text-anchor": "middle", "font-size": 11, fill: "var(--axis-text)" });
+    t.textContent = bucketLabel(p.t, unit, false); svg.append(t);
+  });
+  // end marker + direct label on the latest value
+  svg.append(s("circle", { cx: x(n - 1), cy: y(vals[n - 1]), r: 4, fill: `var(${sr.color})`, stroke: "var(--surface)", "stroke-width": 2 }));
+  const endLabel = s("text", { x: x(n - 1) + 8, y: y(vals[n - 1]) + 4, "font-size": 12, "font-weight": 600, fill: "var(--text-primary)" });
+  endLabel.textContent = nf.format(vals[n - 1]); svg.append(endLabel);
+  const cross = s("line", { y1: T, y2: T + ph, stroke: "var(--baseline)", "stroke-width": 1, opacity: 0 });
+  const dot = s("circle", { r: 4, fill: `var(${sr.color})`, stroke: "var(--surface)", "stroke-width": 2, opacity: 0 });
+  svg.append(cross, dot); box.append(svg);
+  const tip = tooltipFor(box);
+  let cur = -1;
+  const show = (i) => {
+    cur = Math.max(0, Math.min(n - 1, i));
+    cross.setAttribute("x1", x(cur)); cross.setAttribute("x2", x(cur)); cross.setAttribute("opacity", 1);
+    dot.setAttribute("cx", x(cur)); dot.setAttribute("cy", y(vals[cur])); dot.setAttribute("opacity", 1);
+    tip.show((x(cur) / W) * box.clientWidth, (y(vals[cur]) / H) * svg.clientHeight, bucketLabel(points[cur].t, unit, true),
+      [{ color: `var(${sr.color})`, value: nf.format(vals[cur]), label: sr.label }]);
+  };
+  const hide = () => { cross.setAttribute("opacity", 0); dot.setAttribute("opacity", 0); tip.hide(); };
+  svg.addEventListener("pointermove", (e) => {
+    const r = svg.getBoundingClientRect(), px = ((e.clientX - r.left) / r.width) * W;
+    show(n === 1 ? 0 : Math.round(((px - L) / pw) * (n - 1)));
+  });
+  svg.addEventListener("pointerleave", hide);
+  svg.addEventListener("focus", () => show(cur < 0 ? n - 1 : cur));
+  svg.addEventListener("blur", hide);
+  svg.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") { e.preventDefault(); show(cur + (e.key === "ArrowLeft" ? -1 : 1)); }
+  });
+  host.append(tableView([unit === "hour" ? "Hour" : "Day", sr.label], points.map((p, i) => [bucketLabel(p.t, unit, true), nf.format(vals[i])])));
+}
+
+/* ---------- sections ---------- */
+function sectionError(host, sec) {
+  if (sec && sec.error) { host.replaceChildren(el("div", { class: "section-error" }, "⚠ Couldn't load: " + sec.error)); return true; }
+  return false;
+}
+
+function deltaNode(cur, prev, upIsGood) {
+  if (prev == null) return el("span", {}, "");
+  if (!prev && !cur) return el("span", {}, `no change vs ${periodName(DAYS)}`);
+  if (!prev) return el("span", {}, `new vs ${periodName(DAYS)}`);
+  const ch = (cur - prev) / prev;
+  if (Math.abs(ch) < 0.005) return el("span", {}, `same as ${periodName(DAYS)}`);
+  const up = ch > 0, good = up === upIsGood;
+  return el("span", {}, el("span", { class: `${up ? "up" : "down"}-${good ? "good" : "bad"}` },
+    `${up ? "▲" : "▼"} ${Math.abs(ch * 100).toFixed(Math.abs(ch) < 0.1 ? 1 : 0)}%`), ` vs ${periodName(DAYS)}`);
+}
+
+function tile(label, value, unit, delta, title) {
+  return el("div", { class: "card tile", title: title || null },
+    el("div", { class: "label" }, label),
+    el("div", { class: "value" }, value, unit ? el("small", {}, unit) : null),
+    el("div", { class: "delta" }, delta));
+}
+
+function renderTiles(d) {
+  const host = $("#tiles");
+  if (sectionError(host, d.kpis)) return;
+  const c = d.kpis.current, p = d.kpis.previous;
+  const tapped = (x) => x.saved_as_suggested + x.saved_corrected;
+  const saved = (x) => tapped(x) + x.auto_saved;
+  const acc = (x) => tapped(x) ? x.saved_as_suggested / tapped(x) : null;
+  const errRate = (x) => x.ai_messages ? x.errors / x.ai_messages : 0;
+  const cats = Array.isArray(d.categories) ? d.categories : [];
+  const catSaved = cats.reduce((a, r) => a + r.saved, 0), fromDict = cats.reduce((a, r) => a + r.from_dictionary, 0);
+  const accNow = acc(c), accPrev = acc(p);
+  const pp = (a, b) => (a == null || b == null) ? el("span", {}, "") :
+    el("span", {}, el("span", { class: a >= b ? "up-good" : "down-bad" }, `${a >= b ? "▲" : "▼"} ${Math.abs((a - b) * 100).toFixed(1)} pts`), ` vs ${periodName(DAYS)}`);
+  host.replaceChildren(
+    tile("Active users", compact(c.active_users), null, deltaNode(c.active_users, p.active_users, true)),
+    tile("New users", compact(c.new_users), null, el("span", {}, deltaNode(c.new_users, p.new_users, true), ` · ${nf.format(c.total_users)} all time`)),
+    tile("Messages to the AI", compact(c.ai_messages), null, deltaNode(c.ai_messages, p.ai_messages, true)),
+    tile("Expenses saved", compact(saved(c)), null, deltaNode(saved(c), saved(p), true)),
+    tile("Suggestions accepted", accNow == null ? "–" : (accNow * 100).toFixed(0), accNow == null ? null : "%",
+      accNow == null ? el("span", {}, "no taps yet") : pp(accNow, accPrev), "Saved with the suggested category, out of all expenses saved by a tap"),
+    tile("Dictionary hits", catSaved ? (100 * fromDict / catSaved).toFixed(0) : "–", catSaved ? "%" : null,
+      el("span", {}, `${nf.format(fromDict)} of ${nf.format(catSaved)} saved expenses`), "Suggestion came from confirmed spends instead of the AI"),
+    tile("Errors", compact(c.errors), null,
+      el("span", {}, c.ai_messages ? `${pct(c.errors, c.ai_messages, 1)} of messages · ` : "", deltaNode(c.errors, p.errors, false))),
+    tile("Response time (p95)", secs(c.p95_ms), null, el("span", {}, `median ${secs(c.p50_ms)}`)),
+  );
+}
+
+function renderCharts(d) {
+  const s1 = d.series;
+  for (const id of ["#c-messages", "#c-users", "#c-errors"]) if (sectionError($(id), s1)) return renderOutcomes(d);
+  const pts = s1.points, unit = s1.unit;
+  columnChart($("#c-messages"), pts, unit, [
+    { key: "text", label: "Text", color: "--series-1" },
+    { key: "voice", label: "Voice", color: "--series-2" },
+    { key: "upload", label: "Action Button", color: "--series-3" },
+  ]);
+  lineChart($("#c-users"), pts, unit, { key: "active_users", label: "active users", color: "--series-1" });
+  columnChart($("#c-errors"), pts, unit, [{ key: "errors", label: "errors", color: "--critical" }]);
+  renderOutcomes(d);
+}
+
+function renderOutcomes(d) {
+  const host = $("#c-outcomes");
+  if (sectionError(host, d.kpis)) return;
+  const c = d.kpis.current;
+  const parts = [
+    { label: "Saved as suggested", v: c.saved_as_suggested, color: "--series-1" },
+    { label: "Category changed", v: c.saved_corrected, color: "--series-2" },
+    { label: "Auto-saved", v: c.auto_saved, color: "--series-3" },
+    { label: "Discarded", v: c.discarded, color: "--series-4" },
+  ];
+  const total = parts.reduce((a, p) => a + p.v, 0);
+  if (!total) { host.replaceChildren(el("div", { class: "empty" }, "No answered proposals in this period.")); return; }
+  const box = el("div", { class: "chart" });
+  const bar = el("div", { class: "bar", role: "img", "aria-label": parts.map((p) => `${p.label} ${p.v}`).join(", ") });
+  const tip = tooltipFor(box);
+  for (const p of parts.filter((x) => x.v > 0)) {
+    const seg = el("div", { tabindex: 0, style: `flex:${p.v} 1 0;background:var(${p.color})` });
+    const show = () => {
+      const r = seg.getBoundingClientRect(), b = box.getBoundingClientRect();
+      tip.show(r.left - b.left + r.width / 2 - 20, r.top - b.top, p.label,
+        [{ color: `var(${p.color})`, value: nf.format(p.v), label: pct(p.v, total, 1) }]);
+    };
+    seg.addEventListener("pointerenter", show); seg.addEventListener("focus", show);
+    seg.addEventListener("pointerleave", () => tip.hide()); seg.addEventListener("blur", () => tip.hide());
+    bar.append(seg);
+  }
+  box.append(bar);
+  host.replaceChildren(box, el("div", { class: "legend" }, parts.map((p) =>
+    el("span", {}, el("i", { style: `background:var(${p.color})` }), `${p.label} `, el("b", {}, pct(p.v, total)), ` (${nf.format(p.v)})`))));
+}
+
+function table(headers, rows, numericFrom = 1, minWidth = 0) {
+  return el("div", { class: "tablewrap" }, el("table", { style: minWidth ? `min-width:${minWidth}px` : null },
+    el("thead", {}, el("tr", {}, headers.map((h, i) => el("th", { class: i >= numericFrom ? "num" : null }, h)))),
+    el("tbody", {}, rows.map((r) => el("tr", {}, r.map((c, i) => el("td", { class: i >= numericFrom ? "num" : null }, c)))))));
+}
+
+function renderCategories(d) {
+  const host = $("#t-categories");
+  if (sectionError(host, d.categories)) return;
+  const rows = d.categories;
+  if (!rows.length) { host.replaceChildren(el("div", { class: "empty" }, "No expenses saved in this period.")); return; }
+  const max = Math.max(...rows.map((r) => r.saved));
+  host.replaceChildren(table(["Category", "Saved", "Changed", "Auto-saved", "From dictionary", "People"],
+    rows.map((r) => [
+      el("span", {}, el("span", { class: "minibar", style: `width:${Math.max(2, 80 * r.saved / max)}px` }), r.category),
+      nf.format(r.saved), pct(r.corrected, r.saved), pct(r.auto_saved, r.saved), pct(r.from_dictionary, r.saved), nf.format(r.users),
+    ]), 1, 560));
+}
+
+const EVENT_NAMES = { text: "Text", voice: "Voice note", upload_audio: "Action Button (audio)", upload_text: "Action Button (text)" };
+function renderLatency(d) {
+  const host = $("#t-latency");
+  if (sectionError(host, d.latency)) return;
+  if (!d.latency.length) { host.replaceChildren(el("div", { class: "empty" }, "No proposals in this period.")); return; }
+  host.replaceChildren(table(["Input", "Messages", "Median", "p95", "Slowest"],
+    d.latency.map((r) => [EVENT_NAMES[r.event_type] || r.event_type, nf.format(r.n), secs(r.p50_ms), secs(r.p95_ms), secs(r.max_ms)]), 1, 420));
+}
+
+function renderDict(d) {
+  const host = $("#t-dict"), L = d.local, cfg = L.config;
+  const lim = (v) => v > 0 ? nf.format(v) : "no limit";
+  const dict = d.dictionary && !d.dictionary.error ? d.dictionary : null;
+  const item = (k, v, flag) => el("div", {}, el("dt", {}, k), el("dd", { class: flag ? `flag-${flag}` : null }, v));
+  host.replaceChildren(
+    item("Known merchants & items", dict ? nf.format(dict.variants) : "–"),
+    item("…learned from people's choices", dict ? nf.format(dict.learned) : "–"),
+    item("…new in this period", dict ? nf.format(dict.new_in_period) : "–"),
+    item("Messages to the AI today", nf.format(L.usage_today.text + L.usage_today.voice)),
+    item("People at a daily limit today", nf.format(L.at_limit_today), L.at_limit_today ? "warn" : null),
+    item("Daily limit per person", `${lim(cfg.daily_text_limit)} texts · ${lim(cfg.daily_voice_limit)} voice`),
+    item("Longest voice note", cfg.max_voice_seconds > 0 ? `${cfg.max_voice_seconds} s` : "no limit"),
+  );
+}
+
+function renderUsers(d) {
+  const host = $("#t-users");
+  if (sectionError(host, d.users)) return;
+  const st = d.local.user_state, cfg = d.local.config;
+  const blocked = new Set(st.blocked);
+  if (!d.users.length) { host.replaceChildren(el("div", { class: "empty" }, "Nobody used the bot in this period.")); return; }
+  const role = (uid) => uid === st.owner ? "👑 you" : blocked.has(uid) ? "🚫 blocked" :
+    st.households[uid] === "owner" ? "🏠 household creator" : st.households[uid] ? "👤 household member" : "🙂 on their own";
+  const today = (uid) => {
+    const u = st.usage_today[uid] || {};
+    if (Number(uid) === st.owner) return el("span", { class: "muted" }, `${u.text || 0} · ${u.voice || 0} (no limit)`);
+    const txt = `${u.text || 0}/${cfg.daily_text_limit || "∞"} · ${u.voice || 0}/${cfg.daily_voice_limit || "∞"}`;
+    const full = (cfg.daily_text_limit && (u.text || 0) >= cfg.daily_text_limit) || (cfg.daily_voice_limit && (u.voice || 0) >= cfg.daily_voice_limit);
+    return el("span", { class: full ? "flag-warn" : null }, txt);
+  };
+  host.replaceChildren(table(["Person", "Role", "Actions", "To the AI", "Saved", "Errors", "Today (text · voice)", "Last seen"],
+    d.users.map((u) => [
+      el("span", {}, u.name || (u.username ? "@" + u.username : "—"),
+        el("div", { class: "muted", style: "font-size:12px" }, [u.username ? "@" + u.username : null, `id ${u.user_id}`].filter(Boolean).join(" · "))),
+      el("span", { class: "badge" }, role(u.user_id)),
+      nf.format(u.actions), nf.format(u.ai_messages), nf.format(u.saved),
+      u.errors ? el("span", { class: "err" }, nf.format(u.errors)) : "0",
+      today(String(u.user_id)),
+      u.last_seen ? ago(u.last_seen) : "—",
+    ]), 2, 720));
+  $("#users-desc").textContent = `Everyone active in this period, most active first (${d.users.length}${d.users.length === 100 ? "+" : ""}). Block someone in the bot with /block <id>.`;
+}
+
+function renderErrors(d) {
+  const host = $("#t-errors");
+  if (sectionError(host, d.errors)) return;
+  if (!d.errors.length) { host.replaceChildren(el("div", { class: "empty" }, "✓ No errors in this period.")); return; }
+  host.replaceChildren(table(["When", "Who", "What", "Error"], d.errors.map((e) => [
+    when(e.event_ts),
+    e.username ? "@" + e.username : String(e.user_id ?? "—"),
+    [e.event_type, e.command, e.button_action].filter(Boolean).join(" · ") + (e.outcome !== "error" ? ` (${e.outcome})` : ""),
+    el("span", { class: "errmsg" }, (e.error || "").slice(0, 240)),
+  ]), 9, 640));
+}
+
+function renderHealth(d) {
+  const L = d.local, cfg = L.config, host = $("#health");
+  const item = (k, v, flag) => el("div", {}, el("dt", {}, k), el("dd", { class: flag ? `flag-${flag}` : null }, v));
+  const idle = L.last_update_at ? (Date.now() - new Date(L.last_update_at)) / 3600000 : null;
+  host.replaceChildren(
+    item("Running for", duration(L.started_at)),
+    item("Last message received", ago(L.last_update_at), idle != null && idle > 24 ? "warn" : null),
+    item("Waiting for an answer", `${nf.format(L.pending)}${L.pending_oldest ? " · oldest " + ago(L.pending_oldest) : ""}`),
+    item("Log rows queued", nf.format(L.log_buffer), L.log_buffer > 100 ? "warn" : null),
+    item("Log rows in fallback file", nf.format(L.log_fallback_rows), L.log_fallback_rows ? "bad" : null),
+    item("Deleted accounts (restorable)", L.deletions_waiting
+      ? `${nf.format(L.deletions_waiting)} · next erased ${new Date(L.next_erase_at).toLocaleDateString("en-GB", { timeZone: TZ, day: "numeric", month: "short" })}`
+      : "0"),
+    item("Households", `${nf.format(L.households)} (${nf.format(L.household_members)} people)`),
+    item("Blocked people", nf.format(L.blocked)),
+    item("Action Button keys", nf.format(L.upload_keys)),
+    item("AI", `${cfg.llm_provider} · ${cfg.llm_model}`),
+    item("Voice", cfg.transcriber === "local" ? `local Whisper (${cfg.whisper_model})` : cfg.transcriber),
+    item("Categories", nf.format(cfg.categories)),
+    item("Auto-save", cfg.auto_save_minutes > 0 ? `after ${cfg.auto_save_minutes} min` : "off"),
+    item("Upload endpoint", cfg.upload_endpoint ? "on" : "off"),
+    item("Phone access", cfg.public_url ? "public URL set" : "this Mac only"),
+  );
+}
+
+function renderStatus(d) {
+  const L = d.local, problems = [];
+  if (L.log_fallback_rows) problems.push(["bad", "log rows in fallback file"]);
+  for (const k of ["kpis", "series", "categories", "latency", "users", "errors", "dictionary"])
+    if (d[k] && d[k].error) problems.push(["warn", `couldn't load ${k}`]);
+  const c = d.kpis && d.kpis.current;
+  if (c && c.ai_messages >= 20 && c.errors / c.ai_messages > 0.05) problems.push(["bad", "error rate above 5%"]);
+  if (L.log_buffer > 100) problems.push(["warn", "log queue building up"]);
+  const worst = problems.some((p) => p[0] === "bad") ? "bad" : problems.length ? "warn" : "";
+  $("#status").className = "pill " + worst;
+  $("#status-text").textContent = problems.length ? problems.map((p) => p[1]).join(" · ") : "Running normally";
+}
+
+function render(d) {
+  DATA = d;
+  TZ = (d.local && d.local.config && d.local.config.timezone) || TZ;
+  renderStatus(d); renderTiles(d); renderCharts(d); renderCategories(d); renderLatency(d); renderDict(d);
+  renderUsers(d); renderErrors(d); renderHealth(d);
+  $("#updated").textContent = `Updated ${new Date(d.generated_at).toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit" })} (${TZ}) · refreshes every 5 minutes`;
+  $("#period-note").textContent = d.series && d.series.unit === "hour" ? "Charts show hours" : "Charts show days";
+}
+
+async function load() {
+  document.body.classList.add("loading");
+  try {
+    const r = await fetch(`/dashboard/api/metrics?days=${DAYS}`, { credentials: "same-origin", cache: "no-store" });
+    if (r.status === 401) {
+      clearInterval(timer);
+      document.body.replaceChildren(el("div", { class: "signedout" }, el("h1", {}, "📊 Expense bot"),
+        el("p", {}, "You're signed out. Open the bot and tap ▶️ Start → 📊 Dashboard for a new sign-in link.")));
+      return;
+    }
+    render(await r.json());
+  } catch (e) {
+    $("#status").className = "pill bad";
+    $("#status-text").textContent = "Can't reach the bot. Is the Mac awake?";
+  } finally {
+    document.body.classList.remove("loading");
+  }
+}
+
+/* ---------- controls ---------- */
+try { DAYS = Number(localStorage.getItem("days")) || 7; } catch (e) { /* storage blocked: default */ }
+if (![1, 7, 30, 90].includes(DAYS)) DAYS = 7;
+document.getElementById("d" + DAYS).checked = true;
+document.querySelectorAll('input[name="days"]').forEach((r) => r.addEventListener("change", () => {
+  DAYS = Number(r.value);
+  try { localStorage.setItem("days", String(DAYS)); } catch (e) { /* ignore */ }
+  load();
+}));
+$("#refresh").addEventListener("click", load);
+let resizeT;
+window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(() => DATA && renderCharts(DATA), 150); });
+timer = setInterval(() => { if (!document.hidden) load(); }, 300000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+load();
+</script>
+</body>
+</html>

@@ -97,17 +97,43 @@ SHORTCUT_URL=https://www.icloud.com/shortcuts/…
 ```
 Now a member's **📲 Action Button** message reads: open the link → Add Shortcut → paste your key → Settings → Action Button → pick *Log expense*. Without `SHORTCUT_URL`, the bot shows the manual build steps with the URL filled in instead.
 
-## Delete my data
+## 📊 Monitoring dashboard
+
+A web page with the bot's key numbers, for you only. In the bot: **▶️ Start → 📊 Dashboard** (or `/dashboard`). You get a sign-in link that works **once, within 10 minutes**. Opening it keeps that browser signed in for 30 days. **🚪 Sign out everywhere** under the link ends every session and unused link.
+
+**Mac only.** The dashboard has its own tiny server at `http://127.0.0.1:8788/dashboard` that listens only on the Mac. The Tailscale tunnel forwards a different port (8787, the Action Button upload), so the dashboard can't be reached from your phone or the internet, even with the tunnel on. As a second guard, it refuses requests whose address isn't the Mac's own (this stops a website in your browser from reaching it) and anything that came through a proxy. Change the port with `DASHBOARD_PORT` (it must differ from `INGEST_PORT`); turn the dashboard off with `DASHBOARD=off`.
+
+**What's on it** (for the last 24 hours, 7, 30 or 90 days, each compared with the period before):
+- **Overview:** active and new users, messages to the AI, expenses saved, how often the suggested category was kept, dictionary hit rate, errors, and response time (median and p95).
+- **Activity:** messages per day (or hour) split into text, voice and Action Button; active users; errors; and what happened to proposals (saved as suggested, category changed, auto-saved, discarded).
+- **Quality:** per category, how often people changed the suggestion, how often it was auto-saved, and how often it came from the dictionary. Response time by input type. Dictionary size and today's usage against the limits.
+- **Users:** everyone active in the period with their role, activity, errors, today's usage against the limits, and their ID for `/block`.
+- **Recent errors** with the error text, and **bot health**: uptime, last message received, proposals waiting, log queue and fallback file, open data deletions, households, blocked people, and the active settings.
+
+Every chart has a "Show as table" view. The page refreshes every 5 minutes and follows your light or dark setting. Each section is loaded separately, so one failing query shows an error in that card and the rest still loads. Queries are cached for 5 minutes and only read the log, `dim_users` and the dictionary, never the per-user expense tables. BigQuery bills at least 10 MB per table a query touches, so reading every user's table would grow with each new user. A refresh costs about 90 MB, so even a page left open all day stays inside the free tier.
+
+**Security:** besides being Mac-only, the page and its data need the sign-in cookie (HttpOnly, SameSite=Strict). The link message has no preview, so Telegram doesn't use up the link. The signing key is kept in `pending.sqlite3`.
+
+## Delete my data (soft delete, erased after 30 days)
 
 Everyone has **🗑 Delete my data** in the menu (or `/delete_my_data`). It's two steps: a warning that says how many expenses will go, then typing `DELETE` (or `УДАЛИТЬ`) within 5 minutes. Any other message cancels.
 
-**What's deleted:** the person's `fct_expenses_<id>` table, their `dim_users` row, their rows in `log_interactions`, their household membership (a creator's household is ended; nobody else's expenses are touched), their upload key, and everything on the bot's machine (unconfirmed proposals, undo history, language and report settings, unsent log rows).
+**Right away (soft delete):** the data disappears from the bot.
+- The person's `fct_expenses_<id>` table is copied to `deleted_fct_expenses_<id>_<timestamp>` and the original is dropped. The copy is outside the `fct_expenses_*` wildcard, so reports, family totals and `v_expenses_all` no longer see it. Copy jobs are free.
+- Their `dim_users` row gets `deleted_at`, which hides them from 👥 Users and the dashboard.
+- On your Mac: unconfirmed proposals, undo history and the Action Button key are deleted. Language and report view are kept aside for a restore.
+- They leave their household, or it's ended if they created it. Nobody else's expenses are touched.
+- Their `log_interactions` rows stay until the final erase.
 
-**What stays:** shared categories and `dim_spend_variants`. The dictionary only holds anonymous counts ("starbucks → Eating out"), nothing tied to a person. A block by the owner also stays, so deleting data isn't a way around it.
+**Within 30 days:** **↩️ Restore my data** puts everything back. The button is under the "done" message, in the menu while there's something to restore, and at `/restore_my_data`. Expenses logged since are kept alongside the restored ones. Household membership isn't restored; they rejoin with an invite link.
 
-**The interaction log:** BigQuery can't delete rows streamed in the last ~30–90 minutes. Older rows go straight away, and the rest are retried every 30 minutes (queue in `pending.sqlite3`, table `log_purges`) until a clean pass. That usually takes under 2 hours. The confirmation message itself is never logged.
+**After 30 days (hard delete):** a pass every 30 minutes erases the archive table, their log rows up to the deletion, their `dim_users` row and the kept settings. Anything they logged after deleting is left alone, because it's their current data. If they used the bot again in the meantime, their current profile row is kept too. As a backstop, the archive table has a BigQuery **expiration of 31 days**, so it disappears even if your Mac is off. The remaining steps run the next time the bot is up.
 
-**Recovery:** none from the bot. BigQuery time travel can restore a dropped table for 7 days, by hand.
+**Setting:** `DELETE_RETENTION_DAYS` (default 30). `0` means erase at once with no restore, as before; log rows still in BigQuery's streaming buffer are retried until gone.
+
+**What stays:** shared categories and `dim_spend_variants`. The dictionary only holds anonymous counts ("starbucks → Eating out"), nothing tied to a person. A block by the owner and today's usage against the daily limits also stay, so deleting data isn't a way around them.
+
+**On your Mac:** `pending.sqlite3`, table `deletions`, lists every deletion with its status (`soft`, `restored` or `purged`). A purged row keeps only the dates, nothing of the person's data. The dashboard's health card shows how many deleted accounts are waiting and when the next one is erased.
 
 ## Who can use the bot
 
@@ -214,6 +240,7 @@ On first start the bot creates and seeds everything: 13 categories and about 70 
 | `catalog.py` | Shared categories + dictionary: cache, lookup, learning |
 | `users.py` | `dim_users`: who's who, kept current from every interaction |
 | `i18n.py` | All user-facing text in English and Russian, date formats, Telegram command menus |
+| `dashboard.py`, `dashboard.html` | 📊 Monitoring dashboard: sign-in, metrics queries, the page |
 | `household.py` | Households: create, invite links, join/leave/remove/end, `/family` totals |
 | `interactions.py` | Interaction log: per-update record, background streaming to BigQuery |
 | `extractor.py` | Prompt, JSON schema and validation for Gemini / Claude / OpenAI |

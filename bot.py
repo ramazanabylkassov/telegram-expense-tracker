@@ -29,6 +29,7 @@ from telegram.ext import (
 )
 
 import config
+import dashboard
 import extractor
 import i18n
 from catalog import Catalog
@@ -72,8 +73,13 @@ def role_of(user_id: int | None) -> str:
     return "none"
 
 
+STARTED_AT = datetime.now(timezone.utc)
+_last_update: dict = {"at": None}
+
+
 async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Runs before every handler: keeps dim_users current, in the background (never delays a reply)."""
+    _last_update["at"] = datetime.now(timezone.utc)
     user = update.effective_user
     if user is not None:
         asyncio.create_task(users.observe(user, role_of(user.id), pending.get_language(user.id)))
@@ -676,12 +682,14 @@ def main_menu(user_id: int, lang: str) -> InlineKeyboardMarkup:
     else:
         rows.append([b("m_household", "household")])
     if is_admin(user_id):
-        rows.append([b("m_users", "users")])
+        rows.append([b("m_users", "users")] + ([b("m_dashboard", "dashboard")] if config.DASHBOARD else []))
     if shortcut_available():
         rows.append([b("m_shortcut", "shortcut")])
     view = "m_view_detailed" if pending.get_report_mode(user_id) == "detailed" else "m_view_summary"
     rows.insert(1, [b(view, "view")])  # right under Today / Week / Month, which it affects
     rows.append([b("m_reload", "reload"), b("m_language", "language")])
+    if pending.active_deletion(user_id):
+        rows.append([b("m_restore", "restore")])
     rows.append([b("m_help", "help"), b("m_delete", "delete")])
     return InlineKeyboardMarkup(rows)
 
@@ -695,7 +703,8 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "today": cmd_today, "week": cmd_week, "month": cmd_month, "undo": cmd_undo,
         "categories": cmd_categories, "reload": cmd_reload, "family": cmd_family,
         "household": cmd_household, "language": cmd_language, "users": cmd_users, "help": cmd_help,
-        "delete": cmd_delete, "shortcut": cmd_shortcut,
+        "delete": cmd_delete, "shortcut": cmd_shortcut, "dashboard": cmd_dashboard,
+        "restore": cmd_restore,
     }
     if action == "view":
         await toggle_report_view(update)
@@ -817,8 +826,10 @@ async def cmd_delete(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         n = "?"
     note(outcome="delete_prompt", expenses=n)
+    days = config.DELETE_RETENTION_DAYS
+    when = t(lang, "del_when_later", days=days) if days > 0 else t(lang, "del_when_now")
     await update.effective_message.reply_text(
-        t(lang, "del_warning", n=n),
+        t(lang, "del_warning", n=n, when=when),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton(t(lang, "btn_del_continue"), callback_data="del:go"),
@@ -835,6 +846,9 @@ async def handle_delete_button(update: Update, context: ContextTypes.DEFAULT_TYP
     if not can_use(query.from_user.id):
         note(outcome="denied")
         await query.answer(t(lang, "not_allowed"), show_alert=True)
+        return
+    if query.data == "del:restore":
+        await restore_my_data(update, lang)
         return
     await query.answer()
     if query.data == "del:go":
@@ -866,19 +880,29 @@ async def delete_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE
     return True
 
 
+deletion_lock = asyncio.Lock()  # delete / restore / erase, one at a time
+
+
 async def delete_my_data(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str):
-    """Step 4: erase the person's own data. Shared categories/dictionary are anonymous and stay."""
+    """Step 4: soft delete. The person's data disappears from the bot at once, is kept for
+    DELETE_RETENTION_DAYS (restorable from the bot), then erase_due_deletions() removes it for good.
+    Shared categories/dictionary are anonymous and stay."""
     uid = update.effective_user.id
-    users.pause(uid)  # in-flight updates mustn't re-create their dim_users row
-    cutoff = (datetime.now(timezone.utc) + LOG_PURGE_GRACE).isoformat()
-    try:
-        n = await asyncio.to_thread(warehouse.delete_user_data, uid)
-    except Exception as e:
-        log.exception("Deleting user data failed")
-        note(outcome="delete_error", error=f"{type(e).__name__}: {e}"[:1000])
-        await update.effective_message.reply_text(t(lang, "del_failed"))
-        return
-    pending.forget_user(uid)
+    users.pause(uid)  # in-flight updates mustn't un-delete their dim_users row
+    now = datetime.now(timezone.utc)
+    days = config.DELETE_RETENTION_DAYS
+    async with deletion_lock:
+        try:
+            n, archive = await asyncio.to_thread(warehouse.soft_delete_user_data, uid, max(days, 0), now)
+        except Exception as e:
+            log.exception("Deleting user data failed")
+            note(outcome="delete_error", error=f"{type(e).__name__}: {e}"[:1000])
+            await update.effective_message.reply_text(t(lang, "del_failed"))
+            return
+        snapshot = {"language": pending.get_language(uid), "report_mode": pending.get_report_mode(uid)}
+        pending.add_deletion(uid, now.isoformat(), (now + timedelta(days=max(days, 0))).isoformat(),
+                             (now + LOG_PURGE_GRACE).isoformat(), archive, snapshot)
+        pending.forget_user(uid)
     try:  # leave their household (or end it, if they created it); expenses of others stay
         async with household.lock:
             m = household.member(uid)
@@ -889,11 +913,87 @@ async def delete_my_data(update: Update, context: ContextTypes.DEFAULT_TYPE, lan
                 await household.leave(uid)
     except Exception:
         log.exception("Couldn't take %s out of their household", uid)
-    interaction_log.drop_user(uid)
-    pending.add_log_purge(uid, cutoff)  # finished in the background once BigQuery allows it
-    asyncio.create_task(run_log_purges())
-    note(outcome="deleted", expenses_deleted=n, _skip_log=True)  # don't write a new row about them
-    await update.effective_message.reply_text(t(lang, "del_done", n=n))
+    note(outcome="deleted", expenses_deleted=n, retention_days=days, _skip_log=days <= 0)
+    if days <= 0:  # no retention: erase now; log rows still in the streaming buffer are retried by run_log_purges
+        pending.add_log_purge(uid, (now + LOG_PURGE_GRACE).isoformat())
+        asyncio.create_task(erase_due_deletions())
+        asyncio.create_task(run_log_purges())
+        await update.effective_message.reply_text(t(lang, "del_done_now", n=n))
+        return
+    until = fmt_day((now + timedelta(days=days)).astimezone(config.TIMEZONE).date(), lang)
+    await update.effective_message.reply_text(
+        t(lang, "del_done", n=n, days=days, date=until),
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(t(lang, "btn_restore"), callback_data="del:restore")]]
+        ),
+    )
+
+
+async def restore_my_data(update: Update, lang: str):
+    """↩️ Restore my data: within the retention period, put everything back."""
+    uid = update.effective_user.id
+    q = update.callback_query  # only the button under "Deleted" is ours to answer (menu taps are answered already)
+    query = q if q is not None and q.data == "del:restore" else None
+    reply = update.effective_message.reply_text
+    async with deletion_lock:
+        d = pending.active_deletion(uid)
+        if d is None:
+            note(outcome="nothing_to_restore")
+            if query:
+                await query.answer(t(lang, "restore_nothing"), show_alert=True)
+            else:
+                await reply(t(lang, "restore_nothing"))
+            return
+        if query:
+            await query.answer()
+        try:
+            n = await asyncio.to_thread(warehouse.restore_user_data, uid, d["archive_table"])
+        except Exception as e:
+            log.exception("Restoring user data failed")
+            note(outcome="restore_error", error=f"{type(e).__name__}: {e}"[:1000])
+            await reply(t(lang, "restore_failed"))
+            return
+        snap = d["snapshot"]
+        if snap.get("language"):
+            pending.set_language(uid, snap["language"])
+        if snap.get("report_mode"):
+            pending.set_report_mode(uid, snap["report_mode"])
+        pending.finish_deletion(uid, d["deleted_at"], "restored")
+    users.forget_cache(uid)
+    lang = stored_lang(uid)
+    note(outcome="restored", expenses_restored=n)
+    if query:
+        try:
+            await query.edit_message_reply_markup(None)
+        except Exception:
+            pass
+    await reply(t(lang, "restored", n=n))
+
+
+@logged("command")
+async def cmd_restore(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await allowed(update, context):
+        return
+    await restore_my_data(update, ulang(update))
+
+
+async def erase_due_deletions():
+    """Hard delete everything whose retention period is over. Safe to repeat: each step is idempotent,
+    and a deletion is only marked done when every step succeeded (else it's retried next pass).
+    The archive table also expires in BigQuery by itself, even if this Mac is off."""
+    async with deletion_lock:
+        for d in pending.due_deletions(datetime.now(timezone.utc).isoformat()):
+            uid = d["user_id"]
+            try:
+                removed = await asyncio.to_thread(
+                    warehouse.hard_delete_user_data, uid, d["archive_table"], d["log_cutoff"]
+                )
+            except Exception as e:  # e.g. rows still in the streaming buffer (only with retention 0)
+                log.info("Erasing data of %s not possible yet (%s); will retry", uid, str(e)[:120])
+                continue
+            interaction_log.drop_user(uid, d["log_cutoff"])
+            pending.finish_deletion(uid, d["deleted_at"], "purged")
+            log.info("Erased the deleted data of %s (%d log rows)", uid, removed)
 
 
 async def run_log_purges():
@@ -911,12 +1011,14 @@ async def run_log_purges():
 
 
 async def log_purge_loop():
+    """Every 30 minutes: erase deletions whose retention period is over (and finish older log purges)."""
     while True:
-        await asyncio.sleep(1800)
         try:
+            await erase_due_deletions()
             await run_log_purges()
         except Exception:
-            log.exception("Log purge pass failed")
+            log.exception("Deletion pass failed")
+        await asyncio.sleep(1800)
 
 
 CURRENCY_NAMES = {
@@ -933,7 +1035,8 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = ulang(update)
     note(outcome="help_shown")
     currency = CURRENCY_NAMES.get(lang, {}).get(config.DEFAULT_CURRENCY, config.DEFAULT_CURRENCY)
-    text = t(lang, "help_text", currency=currency)
+    days = config.DELETE_RETENTION_DAYS
+    text = t(lang, "help_text", currency=currency, days=days)
     if config.AUTO_SAVE_MINUTES > 0:
         text += t(lang, "help_auto", minutes=f"{config.AUTO_SAVE_MINUTES:g}")
     text += t(lang, "help_household")
@@ -946,7 +1049,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += t(lang, "help_limits",
                   text=config.DAILY_TEXT_LIMIT or unlimited, voice=config.DAILY_VOICE_LIMIT or unlimited,
                   s=config.MAX_VOICE_SECONDS or unlimited)
-    text += t(lang, "help_privacy")
+    text += t(lang, "help_privacy", days=days)
     if is_admin(update.effective_user.id):
         text += t(lang, "help_owner")
     await update.effective_message.reply_text(
@@ -1229,6 +1332,121 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(t(lang, "users_more", n=len(rows) - USERS_SHOWN))
     lines += ["", f"<i>{t(lang, 'users_legend')}</i>"]
     await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+# --------------------------------------------------------------------------- #
+# Owner: 📊 monitoring dashboard (dashboard.py)                                #
+# --------------------------------------------------------------------------- #
+
+
+def local_metrics(days: int) -> dict:
+    """What only the running bot knows, for the dashboard."""
+    now = datetime.now(timezone.utc)
+    today = datetime.now(config.TIMEZONE).date().isoformat()
+    db = pending.db
+    oldest = db.execute("SELECT MIN(created_at) FROM pending").fetchone()[0]
+    usage = {k: n for k, n in db.execute(
+        "SELECT kind, SUM(n) FROM usage WHERE day = ? GROUP BY kind", (today,)).fetchall()}
+    at_limit = 0
+    for kind, limit in (("text", config.DAILY_TEXT_LIMIT), ("voice", config.DAILY_VOICE_LIMIT)):
+        if limit > 0:
+            at_limit += db.execute(
+                "SELECT COUNT(*) FROM usage WHERE day = ? AND kind = ? AND n >= ? AND user_id IS NOT ?",
+                (today, kind, limit, config.OWNER_USER_ID)).fetchone()[0]
+    per_user: dict[str, dict[str, int]] = {}
+    for uid, kind, n in db.execute("SELECT user_id, kind, n FROM usage WHERE day = ?", (today,)).fetchall():
+        per_user.setdefault(str(uid), {})[kind] = n
+    fallback = interaction_log.fallback
+    return {
+        "started_at": STARTED_AT.isoformat(),
+        "last_update_at": _last_update["at"].isoformat() if _last_update["at"] else None,
+        "now": now.isoformat(),
+        "pending": db.execute("SELECT COUNT(*) FROM pending").fetchone()[0],
+        "pending_oldest": oldest,
+        "log_buffer": len(interaction_log.buffer),
+        "log_fallback_rows": sum(1 for _ in fallback.open(encoding="utf-8")) if fallback.exists() else 0,
+        "log_purges_open": len(pending.open_log_purges()),
+        "deletions_waiting": len(soft := pending.soft_deletions()),
+        "next_erase_at": soft[0]["purge_after"] if soft else None,
+        "blocked": len(pending.blocked_ids()),
+        "households": len(household.homes),
+        "household_members": len(household.members),
+        "usage_today": {"text": usage.get("text", 0), "voice": usage.get("voice", 0)},
+        "at_limit_today": at_limit,
+        "upload_keys": db.execute("SELECT COUNT(*) FROM upload_keys").fetchone()[0],
+        "config": {
+            "llm_provider": config.LLM_PROVIDER,
+            "llm_model": {"gemini": config.GEMINI_MODEL, "claude": config.CLAUDE_MODEL,
+                          "openai": config.OPENAI_MODEL}[config.LLM_PROVIDER],
+            "transcriber": "gemini" if config.LLM_PROVIDER == "gemini" else config.TRANSCRIBER,
+            "whisper_model": config.WHISPER_MODEL,
+            "daily_text_limit": config.DAILY_TEXT_LIMIT,
+            "daily_voice_limit": config.DAILY_VOICE_LIMIT,
+            "max_voice_seconds": config.MAX_VOICE_SECONDS,
+            "auto_save_minutes": config.AUTO_SAVE_MINUTES,
+            "upload_endpoint": bool(config.INGEST_SECRET),
+            "public_url": bool(config.INGEST_PUBLIC_URL),
+            "timezone": str(config.TIMEZONE),
+            "currency": config.DEFAULT_CURRENCY,
+            "categories": len(catalog.categories),
+        },
+        "user_state": {  # for the users table
+            "blocked": sorted(pending.blocked_ids()),
+            "households": {str(uid): m.role for uid, m in household.members.items()},
+            "owner": config.OWNER_USER_ID,
+            "usage_today": per_user,
+        },
+    }
+
+
+dash_auth = dashboard.Auth(pending.db)
+metrics = dashboard.Metrics(warehouse.client, warehouse.ds, local_metrics)
+
+
+def dashboard_base() -> str:
+    return f"http://127.0.0.1:{config.DASHBOARD_PORT}"  # this Mac only, never the Tailscale address
+
+
+@logged("command")
+async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner only: a one-time sign-in link to the web dashboard."""
+    if not await allowed(update, context):
+        return
+    lang = ulang(update)
+    msg = update.effective_message
+    if not is_admin(update.effective_user.id):
+        note(outcome="not_owner")
+        await msg.reply_text(t(lang, "owner_only"))
+        return
+    if not config.DASHBOARD:
+        note(outcome="dashboard_off")
+        await msg.reply_text(t(lang, "dash_off"))
+        return
+    link = f"{dashboard_base()}/dashboard/login?t={dash_auth.login_token()}"
+    note(outcome="dashboard_link")
+    text = t(lang, "dash_link", link=html.escape(link, quote=False), minutes=dashboard.LOGIN_TTL // 60)
+    await msg.reply_text(
+        text, parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,  # a preview would fetch the link and use it up
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton(t(lang, "btn_dash_revoke"), callback_data="dash:revoke")]]
+        ),
+    )
+
+
+@logged("button")
+async def handle_dashboard_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🚪 Sign out everywhere: a new signing key ends every dashboard session and unused link."""
+    query = update.callback_query
+    lang = ulang(update)
+    if not is_admin(query.from_user.id):
+        note(outcome="not_owner")
+        await query.answer(t(lang, "owner_only"), show_alert=True)
+        return
+    dash_auth.rotate()
+    note(outcome="dashboard_signed_out")
+    await query.answer(t(lang, "dash_revoked"), show_alert=True)
+    await query.edit_message_text(t(lang, "dash_revoked"))
 
 
 # --------------------------------------------------------------------------- #
@@ -1606,13 +1824,18 @@ async def _post_init(app: Application):
     global _app
     _app = app
     app.bot_data["log_task"] = asyncio.create_task(interaction_log.run())
-    if config.INGEST_SECRET:
+    if config.INGEST_SECRET:  # Action Button uploads (this port is the one the tunnel forwards)
         import ingest
 
         try:
             app.bot_data["ingest_runner"] = await ingest.start(handle_upload, upload_user)
         except OSError:
             log.exception("Upload endpoint could not start (port %s busy?)", config.INGEST_PORT)
+    if config.DASHBOARD:  # separate server, 127.0.0.1 only: the dashboard never goes through the tunnel
+        try:
+            app.bot_data["dashboard_runner"] = await dashboard.start(dash_auth, metrics)
+        except OSError:
+            log.exception("Dashboard could not start (port %s busy?)", config.DASHBOARD_PORT)
     app.bot_data["purge_task"] = asyncio.create_task(log_purge_loop())
     app.bot_data["auto_save_task"] = asyncio.create_task(auto_save_loop())
     saved = dict(pending.all_languages())
@@ -1691,9 +1914,11 @@ def main():
     app.add_handler(CommandHandler("household", cmd_household, filters=new))
     app.add_handler(CommandHandler("users", cmd_users, filters=new))
     app.add_handler(CommandHandler("delete_my_data", cmd_delete, filters=new))
+    app.add_handler(CommandHandler("restore_my_data", cmd_restore, filters=new))
     app.add_handler(CommandHandler("family", cmd_family, filters=new))
     app.add_handler(CommandHandler("shortcut", cmd_shortcut, filters=new))
     app.add_handler(CommandHandler("block", cmd_block, filters=new))
+    app.add_handler(CommandHandler("dashboard", cmd_dashboard, filters=new))
     app.add_handler(CommandHandler("unblock", cmd_unblock, filters=new))
     app.add_handler(MessageHandler(new & filters.Text(MENU_BUTTON_TEXTS), cmd_menu))
     app.add_handler(MessageHandler(new & (filters.VOICE | filters.AUDIO), handle_voice))
@@ -1704,6 +1929,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_language_button, pattern=r"^lang:"))
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern=r"^del:"))
     app.add_handler(CallbackQueryHandler(handle_shortcut_button, pattern=r"^sc:"))
+    app.add_handler(CallbackQueryHandler(handle_dashboard_button, pattern=r"^dash:"))
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_handler(MessageHandler(new & filters.COMMAND, cmd_unknown))
     app.add_handler(MessageHandler(new & ~filters.StatusUpdate.ALL, handle_other))

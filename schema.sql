@@ -104,6 +104,8 @@ CLUSTER BY user_id, event_type, outcome;
 --                | undone | nothing_to_undo | undo_error | unknown_command | blocked
 --                | household_status | household_none | family_report | not_owner | bad_args
 --                | user_blocked | user_unblocked | not_blocked
+--                | dashboard_link | dashboard_off | dashboard_signed_out (button)
+--                | delete_prompt | deleted | delete_error | restored | nothing_to_restore | restore_error
 --   /start join_<code>: join_prompt | invite_invalid | already_member | in_other_household
 --   household buttons: household_created | invite_link_reset | member_removed | household_end_prompt
 --                | household_ended | household_leave_prompt | household_left | household_joined
@@ -130,9 +132,15 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.finance.dim_users` (
   role               STRING,           -- owner | member | none
   first_seen_at      TIMESTAMP,
   last_seen_at       TIMESTAMP,        -- up to ~1 h behind; exact times are in log_interactions
-  updated_at         TIMESTAMP
+  updated_at         TIMESTAMP,
+  deleted_at         TIMESTAMP         -- "Delete my data" pressed: hidden; row erased after DELETE_RETENTION_DAYS
+                                       -- (cleared if they use the bot again; added automatically to older tables)
 )
 CLUSTER BY user_id;
+
+-- Soft-deleted expense tables: deleted_fct_expenses_<user_id>_<YYYYMMDDHHMMSS>
+-- (outside the fct_expenses_* wildcard; BigQuery expires them after retention + 1 day;
+--  the bot drops them itself when the retention period ends, or restores them on request).
 
 -- Everyone with their spending this month:
 -- SELECT u.first_name, u.username, u.role, SUM(e.amount) AS spent

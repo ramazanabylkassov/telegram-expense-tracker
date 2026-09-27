@@ -29,6 +29,7 @@ USERS_SCHEMA = [
     bigquery.SchemaField("first_seen_at", "TIMESTAMP"),
     bigquery.SchemaField("last_seen_at", "TIMESTAMP"),
     bigquery.SchemaField("updated_at", "TIMESTAMP"),
+    bigquery.SchemaField("deleted_at", "TIMESTAMP"),  # "delete my data" pressed; row erased after the retention period
 ]
 
 RESYNC_SECONDS = 3600  # move last_seen_at forward at most this often per person
@@ -47,7 +48,12 @@ class UserDirectory:
     def ensure_table(self, owner_id: int | None, member_ids: list[int]):
         table = bigquery.Table(self.table, schema=USERS_SCHEMA)
         table.clustering_fields = ["user_id"]
-        self.client.create_table(table, exists_ok=True)
+        table = self.client.create_table(table, exists_ok=True)
+        have = {f.name for f in table.schema}
+        missing = [f for f in USERS_SCHEMA if f.name not in have]
+        if missing:  # table from an older version
+            table.schema = list(table.schema) + missing
+            self.client.update_table(table, ["schema"])
         self._backfill(owner_id, member_ids)
 
     def _backfill(self, owner_id: int | None, member_ids: list[int]):
@@ -95,6 +101,7 @@ class UserDirectory:
           is_premium = @is_premium,
           role = @role,
           last_seen_at = GREATEST(IFNULL(t.last_seen_at, @seen), @seen),
+          deleted_at = NULL,  -- they're using the bot again: this row is current, not deleted data
           updated_at = CURRENT_TIMESTAMP()
         WHEN NOT MATCHED THEN INSERT
           (user_id, first_name, last_name, username, telegram_language, bot_language, is_premium, role,

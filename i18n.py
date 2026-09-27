@@ -87,8 +87,8 @@ LEGACY_KB_MENU = ["📋 Menu", "📋 Меню"]
 
 # Added to the owner's own "/" list only.
 OWNER_COMMANDS = {
-    "en": [("users", "Users by activity"), ("block", "Block a user: /block <id>"), ("unblock", "Unblock: /unblock <id>")],
-    "ru": [("users", "Пользователи по активности"), ("block", "Заблокировать: /block <id>"), ("unblock", "Разблокировать: /unblock <id>")],
+    "en": [("dashboard", "Monitoring dashboard"), ("users", "Users by activity"), ("block", "Block a user: /block <id>"), ("unblock", "Unblock: /unblock <id>")],
+    "ru": [("dashboard", "Дашборд мониторинга"), ("users", "Пользователи по активности"), ("block", "Заблокировать: /block <id>"), ("unblock", "Разблокировать: /unblock <id>")],
 }
 
 # ---- strings ----------------------------------------------------------------
@@ -270,7 +270,7 @@ STRINGS: dict[str, dict[str, str]] = {
               "<b>Mistakes</b> — ↩️ Undo removes the last saved expense. Edited messages aren't picked up: "
               "send a new one.\n\n"
               "🏷 Categories · 🌐 Language · the ▶️ Start button below the chat opens everything.\n"
-              "🗑 Delete my data erases everything the bot keeps about you.",
+              "🗑 Delete my data hides everything the bot keeps about you and erases it after {days} days (↩️ Restore brings it back until then).",
         "ru": "❓ <b>Как пользоваться</b>\n\n"
               "Личный учёт расходов. Сообщите, на что потратили, — бот подберёт категорию и сохранит "
               "в вашу таблицу.\n\n"
@@ -285,7 +285,7 @@ STRINGS: dict[str, dict[str, str]] = {
               "<b>Ошибки</b> — ↩️ Отменить удаляет последний сохранённый расход. Правки сообщений "
               "не учитываются: отправьте новое.\n\n"
               "🏷 Категории · 🌐 Язык · кнопка ▶️ Старт под чатом открывает всё.\n"
-              "🗑 Удалить мои данные — стирает всё, что бот хранит о вас.",
+              "🗑 Удалить мои данные — скрывает всё, что бот хранит о вас, и стирает через {days} дней (до этого ↩️ Восстановить вернёт всё обратно).",
     },
     "help_auto": {
         "en": "\n⏱ No answer within {minutes} min? It's saved with the suggested category.",
@@ -318,6 +318,17 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "🔒 Любой, у кого есть ваш ключ, может добавлять расходы в ваш аккаунт. Если ключ утёк, нажмите 🔄 Новый ключ — старый сразу перестанет работать.",
     },
     "btn_sc_new_key": {"en": "🔄 New key", "ru": "🔄 Новый ключ"},
+    "m_dashboard": {"en": "📊 Dashboard", "ru": "📊 Дашборд"},
+    "dash_link": {
+        "en": "📊 <b>Dashboard</b>\n\nYour sign-in link (works once, for {minutes} minutes):\n{link}\n\n💻 Open it on the Mac running the bot; the dashboard isn't reachable from anywhere else. That browser then stays signed in for 30 days.",
+        "ru": "📊 <b>Дашборд</b>\n\nСсылка для входа (одноразовая, действует {minutes} минут):\n{link}\n\n💻 Откройте её на Mac, где работает бот, — больше ниоткуда дашборд не доступен. После входа браузер остаётся авторизованным 30 дней.",
+    },
+    "dash_off": {"en": "The dashboard is turned off (DASHBOARD=off in .env).", "ru": "Дашборд выключен (DASHBOARD=off в .env)."},
+    "btn_dash_revoke": {"en": "🚪 Sign out everywhere", "ru": "🚪 Выйти на всех устройствах"},
+    "dash_revoked": {
+        "en": "Signed out everywhere. Every open dashboard and unused link stopped working.",
+        "ru": "Выход выполнен везде. Все открытые дашборды и неиспользованные ссылки больше не работают.",
+    },
     "btn_sc_get_key": {"en": "📲 Get my Action Button key", "ru": "📲 Получить ключ для кнопки действия"},
     "help_shortcut": {
         "en": "\n\n📲 <b>iPhone Action Button</b>\nPress the Action Button, say what you spent, tap to stop. The proposal arrives here like any other message.\n\nFirst get your personal key with the button below (or ▶️ Start → 📲 Action Button), then:\n{steps}\n\nNo Action Button? Run the Shortcut from the home screen, Siri or Back Tap instead.",
@@ -329,25 +340,47 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Загрузка с кнопки действия в этом боте пока не настроена. Спросите владельца бота.",
     },
     "help_owner": {
-        "en": '\n\n👑 <b>Owner</b> — no daily limits · 👥 Users: who uses the bot (with IDs) · /block &lt;id&gt; and /unblock &lt;id&gt;.',
-        "ru": '\n\n👑 <b>Владелец</b> — без дневных лимитов · 👥 Пользователи: кто пользуется ботом (с ID) · /block &lt;id&gt; и /unblock &lt;id&gt;.',
+        "en": '\n\n👑 <b>Owner</b> — no daily limits · 📊 Dashboard: key numbers on a web page · 👥 Users: who uses the bot (with IDs) · /block &lt;id&gt; and /unblock &lt;id&gt;.',
+        "ru": '\n\n👑 <b>Владелец</b> — без дневных лимитов · 📊 Дашборд: ключевые цифры на веб-странице · 👥 Пользователи: кто пользуется ботом (с ID) · /block &lt;id&gt; и /unblock &lt;id&gt;.',
     },
 
     # delete my data
     "m_delete": {"en": "🗑 Delete my data", "ru": "🗑 Удалить мои данные"},
     "del_warning": {
-        "en": "⚠️ <b>Delete all your data?</b>\n\n"
-              "This permanently removes:\n"
-              "• all your saved expenses ({n})\n"
-              "• your activity history and profile in the bot\n"
-              "• your settings (language, report view) and anything not yet saved\n\n"
-              "Shared categories stay. This can't be undone.",
-        "ru": "⚠️ <b>Удалить все ваши данные?</b>\n\n"
-              "Будут безвозвратно удалены:\n"
-              "• все ваши сохранённые расходы ({n})\n"
-              "• история действий и профиль в боте\n"
-              "• ваши настройки (язык, вид отчётов) и всё несохранённое\n\n"
-              "Общие категории останутся. Отменить это нельзя.",
+        "en": '⚠️ <b>Delete all your data?</b>\n\nThis removes from the bot:\n• all your saved expenses ({n})\n• your activity history and profile\n• your settings (language, report view), anything not yet saved, your Action Button key\n• your household membership (a household you created is ended)\n\n{when}\n\nShared categories stay.',
+        "ru": '⚠️ <b>Удалить все ваши данные?</b>\n\nИз бота будут удалены:\n• все ваши сохранённые расходы ({n})\n• история действий и профиль\n• ваши настройки (язык, вид отчётов), всё несохранённое, ключ для кнопки действия\n• участие в семье (созданная вами семья будет распущена)\n\n{when}\n\nОбщие категории останутся.',
+    },
+    "del_when_later": {
+        "en": "Your data disappears from the bot right away and is kept for {days} days, so you can restore it if this was a mistake. After that it's erased for good.",
+        "ru": 'Данные сразу исчезнут из бота и будут храниться {days} дней — на случай, если вы передумаете. После этого они будут стёрты навсегда.',
+    },
+    "del_when_now": {
+        "en": "This is permanent and can't be undone.",
+        "ru": 'Это навсегда, отменить будет нельзя.',
+    },
+    "del_done_now": {
+        "en": '✅ Done. Deleted {n} expenses, your profile and your settings.\nThe last few minutes of your activity history will be cleared within about 2 hours.',
+        "ru": '✅ Готово. Удалено расходов: {n}, а также профиль и настройки.\nПоследние минуты истории действий будут очищены примерно в течение 2 часов.',
+    },
+    "btn_restore": {
+        "en": '↩️ Restore my data',
+        "ru": '↩️ Восстановить мои данные',
+    },
+    "m_restore": {
+        "en": '↩️ Restore my data',
+        "ru": '↩️ Восстановить мои данные',
+    },
+    "restored": {
+        "en": "↩️ Restored: {n} expenses and your settings are back. Household membership isn't restored; ask for an invite link to rejoin.",
+        "ru": '↩️ Восстановлено: расходов — {n}, настройки тоже вернулись. Участие в семье не восстанавливается — попросите ссылку-приглашение, чтобы вступить снова.',
+    },
+    "restore_nothing": {
+        "en": "There's nothing to restore: no deleted data is waiting, or it has already been erased.",
+        "ru": 'Восстанавливать нечего: удалённых данных нет или они уже стёрты.',
+    },
+    "restore_failed": {
+        "en": "⚠️ Restoring didn't finish. Try again in a minute; repeating it is safe.",
+        "ru": '⚠️ Восстановление не завершилось. Попробуйте ещё раз через минуту — повторять безопасно.',
     },
     "btn_del_continue": {"en": "Continue", "ru": "Продолжить"},
     "btn_del_cancel": {"en": "Cancel", "ru": "Отмена"},
@@ -362,10 +395,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Время подтверждения истекло. Ничего не удалено — начните заново из меню, если нужно.",
     },
     "del_done": {
-        "en": "✅ Done. Deleted {n} expenses, your profile and your settings.\n"
-              "The last few minutes of your activity history will be cleared within about 2 hours.",
-        "ru": "✅ Готово. Удалено расходов: {n}, а также профиль и настройки.\n"
-              "Последние минуты истории действий будут очищены примерно в течение 2 часов.",
+        "en": "✅ Done. {n} expenses, your profile and your settings are gone from the bot.\n\nThey're kept for {days} days and erased for good on {date}. Changed your mind? Tap ↩️ Restore my data before then (it's also in the menu).",
+        "ru": '✅ Готово. Расходов: {n}, а также профиль и настройки удалены из бота.\n\nОни хранятся {days} дней и будут стёрты навсегда {date}. Передумали? Нажмите ↩️ Восстановить мои данные до этого срока (кнопка есть и в меню).',
     },
     "del_failed": {
         "en": "⚠️ Deletion didn't finish. Try again in a minute — repeating it is safe.",
@@ -559,7 +590,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": '\n\n⚖️ Дневные лимиты: {text} сообщений и {voice} голосовых (до {s} с каждое). Обнуляются в полночь.',
     },
     "help_privacy": {
-        "en": "\n\n🔒 Your expenses are stored in the bot owner's Google Cloud (BigQuery). 🗑 Delete my data erases them for good.",
-        "ru": '\n\n🔒 Ваши расходы хранятся в Google Cloud (BigQuery) владельца бота. 🗑 Удалить мои данные — удаляет их навсегда.',
+        "en": "\n\n🔒 Your expenses are stored in the bot owner's Google Cloud (BigQuery). 🗑 Delete my data removes them from the bot at once and erases them for good after {days} days.",
+        "ru": '\n\n🔒 Ваши расходы хранятся в Google Cloud (BigQuery) владельца бота. 🗑 Удалить мои данные — сразу убирает их из бота и навсегда стирает через {days} дней.',
     },
 }

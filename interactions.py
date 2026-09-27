@@ -185,14 +185,17 @@ class InteractionLogger:
         if failed:
             log.warning("Interaction log: %d row(s) not written yet: %s", len(failed), errors[:1])
 
-    def drop_user(self, user_id: int):
-        """"Delete my data": forget this person's rows that haven't reached BigQuery yet."""
-        self.buffer = [r for r in self.buffer if r.get("user_id") != user_id]
+    def drop_user(self, user_id: int, cutoff: str | None = None):
+        """Hard delete: forget this person's rows that never reached BigQuery (up to `cutoff`, if given)."""
+        def gone(row: dict) -> bool:
+            return row.get("user_id") == user_id and (cutoff is None or str(row.get("event_ts", "")) <= cutoff)
+
+        self.buffer = [r for r in self.buffer if not gone(r)]
         if self.fallback.exists():
             kept = []
             for line in self.fallback.read_text(encoding="utf-8").splitlines():
                 try:
-                    if json.loads(line).get("user_id") == user_id:
+                    if gone(json.loads(line)):
                         continue
                 except ValueError:
                     pass

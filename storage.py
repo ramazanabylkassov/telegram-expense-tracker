@@ -95,6 +95,17 @@ class PendingStore:
                    PRIMARY KEY (user_id, day, kind))"""
         )
         self.db.execute(
+            """CREATE TABLE IF NOT EXISTS deletions (
+                   user_id INTEGER NOT NULL,
+                   deleted_at TEXT NOT NULL,       -- when they confirmed "delete my data" (UTC)
+                   purge_after TEXT NOT NULL,      -- hard delete from this moment on
+                   log_cutoff TEXT NOT NULL,       -- log rows up to here belong to the deleted data
+                   archive_table TEXT,             -- deleted_fct_expenses_<id>_<ts>, NULL if they had none
+                   snapshot TEXT,                  -- settings to give back on restore (JSON)
+                   status TEXT NOT NULL DEFAULT 'soft',   -- soft | restored | purged
+                   PRIMARY KEY (user_id, deleted_at))"""
+        )
+        self.db.execute(
             """CREATE TABLE IF NOT EXISTS blocked_users (
                    user_id INTEGER PRIMARY KEY,
                    blocked_at TEXT NOT NULL)"""
@@ -257,10 +268,56 @@ class PendingStore:
 
     def forget_user(self, user_id: int):
         """Everything this machine keeps about the person: proposals, undo history, settings."""
-        # A block is kept on purpose: deleting your data isn't a way around it.
-        for table in ("pending", "saved", "report_prefs", "user_settings", "upload_keys", "usage"):
+        # Kept on purpose: a block and today's usage, so deleting your data isn't a way around them.
+        for table in ("pending", "saved", "report_prefs", "user_settings", "upload_keys"):
             self.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
         self.db.commit()
+
+    def add_deletion(self, user_id: int, deleted_at: str, purge_after: str, log_cutoff: str,
+                     archive_table: str | None, snapshot: dict):
+        self.db.execute(
+            "INSERT INTO deletions (user_id, deleted_at, purge_after, log_cutoff, archive_table, snapshot) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, deleted_at, purge_after, log_cutoff, archive_table, json.dumps(snapshot)),
+        )
+        self.db.commit()
+
+    def active_deletion(self, user_id: int) -> dict | None:
+        """Their latest soft deletion that can still be restored."""
+        row = self.db.execute(
+            "SELECT user_id, deleted_at, purge_after, log_cutoff, archive_table, snapshot FROM deletions "
+            "WHERE user_id = ? AND status = 'soft' ORDER BY deleted_at DESC LIMIT 1", (user_id,)
+        ).fetchone()
+        return self._deletion(row) if row else None
+
+    def due_deletions(self, now: str) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT user_id, deleted_at, purge_after, log_cutoff, archive_table, snapshot FROM deletions "
+            "WHERE status = 'soft' AND purge_after <= ? ORDER BY purge_after", (now,)
+        ).fetchall()
+        return [self._deletion(r) for r in rows]
+
+    def soft_deletions(self) -> list[dict]:
+        rows = self.db.execute(
+            "SELECT user_id, deleted_at, purge_after, log_cutoff, archive_table, snapshot FROM deletions "
+            "WHERE status = 'soft' ORDER BY purge_after"
+        ).fetchall()
+        return [self._deletion(r) for r in rows]
+
+    def finish_deletion(self, user_id: int, deleted_at: str, status: str):
+        """restored, or purged (then the snapshot goes too: nothing of theirs is kept)."""
+        self.db.execute(
+            "UPDATE deletions SET status = ?, snapshot = CASE WHEN ? = 'purged' THEN NULL ELSE snapshot END "
+            "WHERE user_id = ? AND deleted_at = ?", (status, status, user_id, deleted_at)
+        )
+        self.db.commit()
+
+    @staticmethod
+    def _deletion(row) -> dict:
+        keys = ("user_id", "deleted_at", "purge_after", "log_cutoff", "archive_table", "snapshot")
+        d = dict(zip(keys, row))
+        d["snapshot"] = json.loads(d["snapshot"]) if d["snapshot"] else {}
+        return d
 
     def add_log_purge(self, user_id: int, cutoff: str):
         self.db.execute(
@@ -550,27 +607,75 @@ class Warehouse:
 
     # ---- "delete my data" ---------------------------------------------------- #
 
-    def delete_user_data(self, user_id: int) -> int:
-        """Drop the person's expense table and their dim_users row. Returns how many expenses were deleted.
-        Their log rows are removed separately (purge_user_log), because recently streamed rows
-        can't be deleted until BigQuery moves them out of its streaming buffer."""
-        table = self.fact_table(user_id)
+    # ---- "delete my data": soft delete now, hard delete after the retention period ---- #
+
+    def archive_table_name(self, user_id: int, when: datetime) -> str:
+        # Outside the fct_expenses_* wildcard, so reports, family totals and v_expenses_all never see it.
+        return f"{self.ds}.deleted_{config.FACT_TABLE_PREFIX}{int(user_id)}_{when:%Y%m%d%H%M%S}"
+
+    def soft_delete_user_data(self, user_id: int, retention_days: int, when: datetime) -> tuple[int, str | None]:
+        """Move the person's expense table to an archive table that BigQuery itself deletes after
+        `retention_days` (+1 day of slack, so the bot's own hard delete normally comes first), and mark
+        their dim_users row deleted. Returns (expenses archived, archive table or None)."""
+        src = self.fact_table(user_id)
         try:
-            n = next(iter(self.client.query(f"SELECT COUNT(*) AS n FROM `{table}`").result())).n
+            row = next(iter(self.client.query(f"SELECT COUNT(*) AS n FROM `{src}`").result()), None)
+            n = row.n if row is not None else 0
         except NotFound:
-            n = 0
-        self.client.delete_table(table, not_found_ok=True)
+            n, dst = 0, None
+        else:
+            dst = self.archive_table_name(user_id, when)
+            self.client.copy_table(src, dst).result()  # copy jobs are free
+            table = self.client.get_table(dst)
+            table.expires = when + timedelta(days=retention_days + 1)
+            table.description = (f"Soft-deleted expenses of user {user_id} ({when:%Y-%m-%d %H:%M} UTC). "
+                                 f"Restorable from the bot until they are erased.")
+            self.client.update_table(table, ["expires", "description"])
+            self.client.delete_table(src, not_found_ok=True)
         self._fact_tables_ready.discard(user_id)
+        self._dml(f"UPDATE `{self.ds}.dim_users` SET deleted_at = CURRENT_TIMESTAMP() WHERE user_id = @uid",
+                  uid=user_id)
+        return n, dst
+
+    def restore_user_data(self, user_id: int, archive: str | None) -> int:
+        """Put the archived expenses back (next to anything logged since) and unmark dim_users."""
+        n = 0
+        if archive:
+            try:
+                old = self.client.get_table(archive)
+            except NotFound:
+                old = None  # already expired
+            if old is not None:
+                self._ensure_fact_table(user_id)
+                have = {f.name for f in self.client.get_table(self.fact_table(user_id)).schema}
+                cols = ", ".join(f"`{f.name}`" for f in old.schema if f.name in have)
+                job = self.client.query(
+                    f"INSERT INTO `{self.fact_table(user_id)}` ({cols}) SELECT {cols} FROM `{archive}`"
+                )
+                job.result()
+                n = job.num_dml_affected_rows or 0
+                self.client.delete_table(archive, not_found_ok=True)
+        self._dml(f"UPDATE `{self.ds}.dim_users` SET deleted_at = NULL WHERE user_id = @uid", uid=user_id)
+        return n
+
+    def hard_delete_user_data(self, user_id: int, archive: str | None, cutoff: str) -> int:
+        """End of the retention period: erase the archive, the log rows up to the deletion, and the
+        dim_users row unless they came back and used the bot since (then deleted_at was cleared)."""
+        if archive:
+            self.client.delete_table(archive, not_found_ok=True)
+        removed = self.purge_user_log(user_id, cutoff)
+        self._dml(f"DELETE FROM `{self.ds}.dim_users` WHERE user_id = @uid AND deleted_at IS NOT NULL",
+                  uid=user_id)
+        return removed
+
+    def _dml(self, sql: str, **params):
+        types = {int: "INT64", str: "STRING"}
         try:
-            self.client.query(
-                f"DELETE FROM `{self.ds}.dim_users` WHERE user_id = @uid",
-                job_config=bigquery.QueryJobConfig(
-                    query_parameters=[bigquery.ScalarQueryParameter("uid", "INT64", user_id)]
-                ),
-            ).result()
+            self.client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=[
+                bigquery.ScalarQueryParameter(k, types[type(v)], v) for k, v in params.items()
+            ])).result()
         except NotFound:
             pass
-        return n
 
     def purge_user_log(self, user_id: int, cutoff: str) -> int:
         """Delete the person's interaction-log rows up to `cutoff`. Raises while some are still
@@ -611,6 +716,7 @@ class Warehouse:
           a.actions, a.actions_30d, a.saved, a.last_seen
         FROM activity a
         LEFT JOIN `{self.ds}.dim_users` u USING (user_id)
+        WHERE u.deleted_at IS NULL  -- people who deleted their data don't show while it waits to be erased
         ORDER BY a.actions_30d DESC, a.actions DESC, a.last_seen DESC
         """
         try:

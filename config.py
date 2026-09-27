@@ -77,6 +77,10 @@ DAILY_TEXT_LIMIT = int(os.getenv("DAILY_TEXT_LIMIT", "50"))
 DAILY_VOICE_LIMIT = int(os.getenv("DAILY_VOICE_LIMIT", "30"))
 MAX_VOICE_SECONDS = int(os.getenv("MAX_VOICE_SECONDS", "120"))  # longer voice notes are refused (0 = any)
 
+# "Delete my data": the data is hidden at once and kept this many days (restorable from the bot),
+# then erased for good. 0 = erase right away, no restore.
+DELETE_RETENTION_DAYS = int(os.getenv("DELETE_RETENTION_DAYS", "30"))
+
 # A proposal nobody answers is saved with its suggested category after this many minutes
 # (counted from the proposal or the last tap on it). 0 = never auto-save.
 AUTO_SAVE_MINUTES = float(os.getenv("AUTO_SAVE_MINUTES", "10"))
@@ -87,6 +91,12 @@ AUTO_SAVE_MINUTES = float(os.getenv("AUTO_SAVE_MINUTES", "10"))
 INGEST_SECRET = os.getenv("INGEST_SECRET", "").strip() or None
 INGEST_HOST = os.getenv("INGEST_HOST", "127.0.0.1")  # a tunnel (e.g. Tailscale Funnel) forwards to this
 INGEST_PORT = int(os.getenv("INGEST_PORT", "8787"))
+# 📊 Monitoring dashboard (owner only; sign in from the bot). It has its own server that only
+# listens on this Mac (127.0.0.1), on a port the Tailscale tunnel doesn't forward.
+DASHBOARD = os.getenv("DASHBOARD", "on").strip().lower() in ("on", "true", "1", "yes")
+DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8788"))
+if DASHBOARD and DASHBOARD_PORT == INGEST_PORT:
+    raise RuntimeError("DASHBOARD_PORT must differ from INGEST_PORT (the dashboard must not share the tunnelled port)")
 # Public address of the endpoint (e.g. https://your-mac.tail1234.ts.net). Needed for the bot's
 # 📲 Action Button menu, which gives every user their own key and the setup steps.
 INGEST_PUBLIC_URL = os.getenv("INGEST_PUBLIC_URL", "").strip().rstrip("/") or None
