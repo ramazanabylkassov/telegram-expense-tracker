@@ -25,7 +25,7 @@ USERS_SCHEMA = [
     bigquery.SchemaField("telegram_language", "STRING"),  # the Telegram app's language code
     bigquery.SchemaField("bot_language", "STRING"),  # language chosen in the bot (en | ru)
     bigquery.SchemaField("is_premium", "BOOL"),
-    bigquery.SchemaField("role", "STRING"),  # owner | member | none
+    bigquery.SchemaField("role", "STRING"),  # owner (of the bot) | household_owner | member | none | blocked
     bigquery.SchemaField("first_seen_at", "TIMESTAMP"),
     bigquery.SchemaField("last_seen_at", "TIMESTAMP"),
     bigquery.SchemaField("updated_at", "TIMESTAMP"),

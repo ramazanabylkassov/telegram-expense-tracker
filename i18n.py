@@ -62,6 +62,8 @@ COMMANDS = {
         ("undo", "Remove the last saved expense"),
         ("categories", "Category list"),
         ("language", "Change language"),
+        ("household", "Household: shared totals"),
+        ("family", "Household totals"),
         ("reload", "Reload categories from BigQuery"),
         ("help", "How to use the bot"),
     ],
@@ -73,6 +75,8 @@ COMMANDS = {
         ("undo", "Отменить последний расход"),
         ("categories", "Список категорий"),
         ("language", "Сменить язык"),
+        ("household", "Семья: общие итоги"),
+        ("family", "Итоги семьи"),
         ("reload", "Обновить категории из BigQuery"),
         ("help", "Как пользоваться ботом"),
     ],
@@ -83,8 +87,8 @@ LEGACY_KB_MENU = ["📋 Menu", "📋 Меню"]
 
 # Added to the owner's own "/" list only.
 OWNER_COMMANDS = {
-    "en": [("users", "Users by activity"), ("household", "Share the bot with your household")],
-    "ru": [("users", "Пользователи по активности"), ("household", "Семейный режим")],
+    "en": [("users", "Users by activity"), ("block", "Block a user: /block <id>"), ("unblock", "Unblock: /unblock <id>")],
+    "ru": [("users", "Пользователи по активности"), ("block", "Заблокировать: /block <id>"), ("unblock", "Разблокировать: /unblock <id>")],
 }
 
 # ---- strings ----------------------------------------------------------------
@@ -95,25 +99,6 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "Your Telegram user ID is {uid}. If this is your bot, set OWNER_USER_ID to it in .env and restart.",
         "ru": "Ваш Telegram ID: {uid}. Если это ваш бот, укажите его в OWNER_USER_ID в файле .env и перезапустите бота.",
     },
-    "private_bot": {
-        "en": "This is a private bot. I've let its owner know you'd like to use it.",
-        "ru": "Это приватный бот. Я сообщил владельцу, что вы хотите им пользоваться.",
-    },
-    "join_request_on": {
-        "en": "👋 {name} wants to use the bot.\nAdd them to your household?",
-        "ru": "👋 {name} хочет пользоваться ботом.\nДобавить в семью?",
-    },
-    "join_request_off": {
-        "en": "👋 {name} wants to use the bot.\n\nHousehold mode is off, so the bot is only yours. "
-              "Start a household to let them in? Each person keeps their own expense table, "
-              "and you get combined /family reports.",
-        "ru": "👋 {name} хочет пользоваться ботом.\n\nСемейный режим выключен — бот только ваш. "
-              "Включить его, чтобы добавить этого человека? У каждого будет своя таблица расходов, "
-              "а вам станут доступны общие отчёты /family.",
-    },
-    "btn_add_to_household": {"en": "➕ Add to household", "ru": "➕ Добавить в семью"},
-    "btn_start_and_add": {"en": "🏠 Start household & add", "ru": "🏠 Включить и добавить"},
-    "btn_ignore": {"en": "Ignore", "ru": "Игнорировать"},
     "not_allowed": {"en": "Not allowed", "ru": "Нет доступа"},
 
     # expenses
@@ -125,6 +110,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "en": "⚠️ Couldn't process that voice note — please try again.",
         "ru": "⚠️ Не получилось обработать голосовое — попробуйте ещё раз.",
     },
+    "voice_empty": {
+        "en": "🎙 I couldn't hear anything in that recording. Try again and speak for a second or two.",
+        "ru": "🎙 В этой записи ничего не слышно. Попробуйте ещё раз и говорите хотя бы секунду-две.",
+    },
+    "upload_prefix": {"en": "📲 From your Shortcut:", "ru": "📲 Из вашей быстрой команды:"},
     "no_expense": {
         "en": "I didn't find an expense in that. Try something like “coffee 1500” or “taxi 2.3k yesterday”.",
         "ru": "Не нашёл в сообщении расходов. Попробуйте, например: «кофе 1500» или «такси 2300 вчера».",
@@ -163,8 +153,14 @@ STRINGS: dict[str, dict[str, str]] = {
     "m_month": {"en": "🗓 Month", "ru": "🗓 Месяц"},
     "m_undo": {"en": "↩️ Undo last", "ru": "↩️ Отменить"},
     "m_categories": {"en": "🏷 Categories", "ru": "🏷 Категории"},
-    "m_family": {"en": "👨‍👩‍👧 Family", "ru": "👨‍👩‍👧 Семья"},
-    "m_household": {"en": "🏠 Household", "ru": "🏠 Семейный режим"},
+    "m_family": {
+        "en": '👨\u200d👩\u200d👧 Family totals',
+        "ru": '👨\u200d👩\u200d👧 Итоги семьи',
+    },
+    "m_household": {
+        "en": '🏠 Household',
+        "ru": '🏠 Семья',
+    },
     "m_reload": {"en": "🔄 Reload", "ru": "🔄 Обновить"},
     "m_users": {"en": "👥 Users", "ru": "👥 Пользователи"},
     "m_help": {"en": "❓ How it works", "ru": "❓ Как пользоваться"},
@@ -204,67 +200,55 @@ STRINGS: dict[str, dict[str, str]] = {
     "removed_summary": {"en": "↩️ Removed: {s}", "ru": "↩️ Удалено: {s}"},
 
     # household
-    "hh_start_prompt": {
-        "en": "🏠 <b>Household mode is off</b> — the bot is only yours.\n\n"
-              "Start a household to share it: each person logs their own expenses into their own table, "
-              "the category dictionary is shared, and you get combined /family reports. "
-              "You can end it any time; everyone's data stays.",
-        "ru": "🏠 <b>Семейный режим выключен</b> — бот только ваш.\n\n"
-              "Включите его, чтобы делиться ботом: каждый ведёт свои расходы в своей таблице, "
-              "словарь категорий общий, а вам доступны общие отчёты /family. "
-              "Выключить можно в любой момент — данные сохранятся.",
+    "hh_title": {
+        "en": '🏠 <b>{name}</b>',
+        "ru": '🏠 <b>{name}</b>',
     },
-    "btn_start_household": {"en": "🏠 Start household", "ru": "🏠 Включить"},
-    "btn_not_now": {"en": "Not now", "ru": "Не сейчас"},
-    "hh_title": {"en": "🏠 <b>Household</b>", "ru": "🏠 <b>Семья</b>"},
-    "hh_owner_tag": {"en": " (owner)", "ru": " (владелец)"},
-    "btn_remove_member": {"en": "Remove {name}", "ru": "Удалить: {name}"},
-    "hh_howto": {
-        "en": "\nTo add someone: they message the bot and you get an Add button, "
-              "or send <code>/household add &lt;telegram_id&gt; &lt;name&gt;</code>.",
-        "ru": "\nЧтобы добавить человека: пусть напишет боту — вам придёт кнопка «Добавить». "
-              "Или отправьте <code>/household add &lt;telegram_id&gt; &lt;имя&gt;</code>.",
+    "hh_owner_tag": {
+        "en": ' (created it)',
+        "ru": ' (создатель)',
     },
-    "btn_end_household": {"en": "End household", "ru": "Выключить семейный режим"},
-    "hh_owner_only_cmd": {
-        "en": "Only the bot's owner can manage the household.",
-        "ru": "Управлять семьёй может только владелец бота.",
+    "btn_remove_member": {
+        "en": 'Remove {name}',
+        "ru": 'Удалить: {name}',
     },
-    "hh_usage": {"en": "Usage: /household add <telegram_id> <name>", "ru": "Формат: /household add <telegram_id> <имя>"},
-    "hh_added": {"en": "➕ Added {name}.", "ru": "➕ Добавлено: {name}."},
-    "hh_removed": {"en": "Removed.", "ru": "Удалено."},
-    "hh_welcome": {
-        "en": "🏠 You've been added to the household. Send me what you spend — e.g. “coffee 1500” — "
-              "as text or a voice note. /start shows everything I can do.",
-        "ru": "🏠 Вас добавили в семью. Пишите или наговаривайте, на что потратили, например «кофе 1500». "
-              "/start — все возможности.",
+    "btn_end_household": {
+        "en": 'End household',
+        "ru": 'Распустить семью',
     },
-    "hh_owner_only_btn": {"en": "Only the owner can do that", "ru": "Это может сделать только владелец"},
-    "hh_started_toast": {"en": "Household started", "ru": "Семейный режим включён"},
-    "hh_declined": {
-        "en": "OK — household mode stays off. /household brings this back.",
-        "ru": "Хорошо, семейный режим остаётся выключенным. /household — вернуться к этому.",
+    "hh_removed_toast": {
+        "en": 'Removed',
+        "ru": 'Удалено',
     },
-    "hh_added_toast": {"en": "Added", "ru": "Добавлено"},
-    "hh_started_prefix": {"en": "🏠 Household started. ", "ru": "🏠 Семейный режим включён. "},
-    "hh_can_use_now": {"en": "➕ {name} can now use the bot.", "ru": "➕ {name} теперь может пользоваться ботом."},
-    "hh_ignored": {"en": "Ignored. They can't use the bot.", "ru": "Проигнорировано. Этот человек не сможет пользоваться ботом."},
-    "hh_removed_toast": {"en": "Removed", "ru": "Удалено"},
     "hh_end_confirm": {
-        "en": "End the household? Members lose access to the bot. Everyone's expenses stay in BigQuery.",
-        "ru": "Выключить семейный режим? Участники потеряют доступ к боту. Все расходы останутся в BigQuery.",
+        "en": "End the household? Everyone leaves it and the invite link stops working. Nobody's expenses are deleted.",
+        "ru": 'Распустить семью? Все участники выйдут, ссылка-приглашение перестанет работать. Ничьи расходы не удаляются.',
     },
-    "btn_yes_end": {"en": "Yes, end it", "ru": "Да, выключить"},
+    "btn_yes_end": {
+        "en": 'Yes, end it',
+        "ru": 'Да, распустить',
+    },
     "btn_cancel": {"en": "Cancel", "ru": "Отмена"},
-    "hh_ended_toast": {"en": "Household ended", "ru": "Семейный режим выключен"},
-    "hh_ended": {
-        "en": "Household ended. The bot is only yours again. /household to start a new one.",
-        "ru": "Семейный режим выключен. Бот снова только ваш. /household — включить заново.",
+    "hh_ended_toast": {
+        "en": 'Household ended',
+        "ru": 'Семья распущена',
     },
-    "hh_off_member": {"en": "Household mode is off.", "ru": "Семейный режим выключен."},
-    "family_title_today": {"en": "Household · today ({d})", "ru": "Семья · сегодня ({d})"},
-    "family_title_week": {"en": "Household · last 7 days ({a} – {b})", "ru": "Семья · последние 7 дней ({a} – {b})"},
-    "family_title_month": {"en": "Household · {m}", "ru": "Семья · {m}"},
+    "hh_ended": {
+        "en": "Household ended. Everyone's expenses stay with them. You can create a new one any time.",
+        "ru": 'Семья распущена. Расходы остались у каждого. Новую семью можно создать в любой момент.',
+    },
+    "family_title_today": {
+        "en": '{h} · today ({d})',
+        "ru": '{h} · сегодня ({d})',
+    },
+    "family_title_week": {
+        "en": '{h} · last 7 days ({a} – {b})',
+        "ru": '{h} · последние 7 дней ({a} – {b})',
+    },
+    "family_title_month": {
+        "en": '{h} · {m}',
+        "ru": '{h} · {m}',
+    },
     "family_failed": {
         "en": "⚠️ Couldn't load household totals right now.",
         "ru": "⚠️ Не удалось загрузить семейные итоги.",
@@ -273,7 +257,7 @@ STRINGS: dict[str, dict[str, str]] = {
     # how it works
     "help_text": {
         "en": "❓ <b>How it works</b>\n\n"
-              "A private expense tracker. Tell it what you spent — it picks a category and saves it "
+              "A personal expense tracker. Tell it what you spent — it picks a category and saves it "
               "to your own table.\n\n"
               "<b>1. Log</b> — type or send a voice note:\n"
               "“coffee 1500”, “Magnum 12 400 and taxi 2k”, “вчера аптека 3500”.\n"
@@ -303,9 +287,50 @@ STRINGS: dict[str, dict[str, str]] = {
               "🏷 Категории · 🌐 Язык · кнопка ▶️ Старт под чатом открывает всё.\n"
               "🗑 Удалить мои данные — стирает всё, что бот хранит о вас.",
     },
+    "help_auto": {
+        "en": "\n⏱ No answer within {minutes} min? It's saved with the suggested category.",
+        "ru": "\n⏱ Нет ответа {minutes} мин? Расход сохранится с предложенной категорией.",
+    },
+    "auto_saved": {"en": "auto-saved", "ru": "сохранено автоматически"},
+    "m_shortcut": {"en": "📲 Action Button", "ru": "📲 Кнопка действия"},
+    "sc_title": {
+        "en": "📲 <b>Log expenses with the iPhone Action Button</b>\nPress it, say what you spent, tap to stop. The proposal arrives here as usual.",
+        "ru": "📲 <b>Расходы с кнопки действия iPhone</b>\nНажмите, скажите, на что потратили, коснитесь, чтобы остановить. Предложение придёт сюда, как обычно.",
+    },
+    "sc_key": {
+        "en": "🔑 Your personal key (tap to copy):\n<code>{secret}</code>\nIt's shown only this once, so keep it until the Shortcut is set up.",
+        "ru": "🔑 Ваш личный ключ (нажмите, чтобы скопировать):\n<code>{secret}</code>\nОн показывается только один раз — сохраните его до настройки команды.",
+    },
+    "sc_key_hidden": {
+        "en": "🔑 You already have a key. For safety it isn't shown again. Lost it, or setting up a new phone? Tap 🔄 New key.",
+        "ru": "🔑 У вас уже есть ключ. Из соображений безопасности он не показывается повторно. Потеряли его или настраиваете новый телефон? Нажмите 🔄 Новый ключ.",
+    },
+    "sc_steps_link": {
+        "en": "<b>Setup (1 minute, on your iPhone):</b>\n1. Open {link} and tap <b>Add Shortcut</b>.\n2. When it asks for your key, paste the key.\n3. Settings → Action Button → <b>Shortcut</b> → pick «{name}».",
+        "ru": "<b>Настройка (1 минута, на iPhone):</b>\n1. Откройте {link} и нажмите <b>Добавить быструю команду</b>.\n2. Когда спросит ключ, вставьте его.\n3. Настройки → Кнопка действия → <b>Быстрая команда</b> → выберите «{name}».",
+    },
+    "sc_steps_manual": {
+        "en": "<b>Setup (Shortcuts app → +):</b>\n1. <b>Record Audio</b>: start Immediately, finish On Tap.\n2. <b>Get Contents of URL</b>: <code>{url}</code>\n   Method <b>POST</b> · header <code>Authorization</code> = <code>Bearer </code> + your key\n   Request Body <b>Form</b> · key <code>file</code>, type File, value <i>Recorded Audio</i>.\n3. Name it «{name}», then Settings → Action Button → Shortcut → pick it.",
+        "ru": "<b>Настройка (приложение «Быстрые команды» → +):</b>\n1. <b>Записать аудио</b>: начало — сразу, окончание — по касанию.\n2. <b>Получить содержимое URL</b>: <code>{url}</code>\n   Метод <b>POST</b> · заголовок <code>Authorization</code> = <code>Bearer </code> + ваш ключ\n   Тело запроса <b>Форма</b> · ключ <code>file</code>, тип «Файл», значение <i>Записанное аудио</i>.\n3. Назовите её «{name}», затем Настройки → Кнопка действия → Быстрая команда → выберите её.",
+    },
+    "sc_footer": {
+        "en": "🔒 Anyone with your key can add expenses to your account. If it leaks, tap 🔄 New key and the old one stops working at once.",
+        "ru": "🔒 Любой, у кого есть ваш ключ, может добавлять расходы в ваш аккаунт. Если ключ утёк, нажмите 🔄 Новый ключ — старый сразу перестанет работать.",
+    },
+    "btn_sc_new_key": {"en": "🔄 New key", "ru": "🔄 Новый ключ"},
+    "btn_sc_get_key": {"en": "📲 Get my Action Button key", "ru": "📲 Получить ключ для кнопки действия"},
+    "help_shortcut": {
+        "en": "\n\n📲 <b>iPhone Action Button</b>\nPress the Action Button, say what you spent, tap to stop. The proposal arrives here like any other message.\n\nFirst get your personal key with the button below (or ▶️ Start → 📲 Action Button), then:\n{steps}\n\nNo Action Button? Run the Shortcut from the home screen, Siri or Back Tap instead.",
+        "ru": "\n\n📲 <b>Кнопка действия iPhone</b>\nНажмите кнопку действия, скажите, на что потратили, коснитесь, чтобы остановить. Предложение придёт сюда, как обычное сообщение.\n\nСначала получите личный ключ кнопкой ниже (или ▶️ Старт → 📲 Кнопка действия), затем:\n{steps}\n\nНет кнопки действия? Запускайте команду с экрана «Домой», через Siri или «Касание задней панели».",
+    },
+    "sc_new_key_done": {"en": "New key created. The old one no longer works.", "ru": "Новый ключ создан. Старый больше не работает."},
+    "sc_off": {
+        "en": "Action Button uploads aren't set up on this bot yet. Ask the bot's owner.",
+        "ru": "Загрузка с кнопки действия в этом боте пока не настроена. Спросите владельца бота.",
+    },
     "help_owner": {
-        "en": "\n\n👑 <b>Owner</b> — 👥 Users: who uses the bot · 🏠 Household: share it with family.",
-        "ru": "\n\n👑 <b>Владелец</b> — 👥 Пользователи: кто пользуется ботом · 🏠 Семейный режим: поделиться с семьёй.",
+        "en": '\n\n👑 <b>Owner</b> — no daily limits · 👥 Users: who uses the bot (with IDs) · /block &lt;id&gt; and /unblock &lt;id&gt;.',
+        "ru": '\n\n👑 <b>Владелец</b> — без дневных лимитов · 👥 Пользователи: кто пользуется ботом (с ID) · /block &lt;id&gt; и /unblock &lt;id&gt;.',
     },
 
     # delete my data
@@ -354,13 +379,13 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "👥 <b>Пользователей: {n}</b> · активны за 30 дней: {a}",
     },
     "users_line": {
-        "en": "{i}. {icon} {name} — {actions} actions ({recent} in 30 days) · {saved} saved · last {last}",
-        "ru": "{i}. {icon} {name} — действий: {actions} (за 30 дней: {recent}) · сохранено: {saved} · был(а) {last}",
+        "en": '{i}. {icon} {name} · <code>{uid}</code> — {actions} actions ({recent} in 30 days) · {saved} saved · last {last}',
+        "ru": '{i}. {icon} {name} · <code>{uid}</code> — действий: {actions} (за 30 дней: {recent}) · сохранено: {saved} · был(а) {last}',
     },
     "users_more": {"en": "…and {n} more", "ru": "…и ещё {n}"},
     "users_legend": {
-        "en": "👑 owner · 👤 household member · 🚫 no access",
-        "ru": "👑 владелец · 👤 участник семьи · 🚫 нет доступа",
+        "en": '👑 you · 🏠 created a household · 👤 household member · 🙂 on their own · 🚫 blocked\nBlock someone: /block &lt;id&gt; · undo: /unblock &lt;id&gt;',
+        "ru": '👑 вы · 🏠 создал(а) семью · 👤 участник семьи · 🙂 сам(а) по себе · 🚫 заблокирован(а)\nЗаблокировать: /block &lt;id&gt; · отменить: /unblock &lt;id&gt;',
     },
     "users_none": {"en": "No activity logged yet.", "ru": "Пока нет активности."},
     "users_failed": {"en": "⚠️ Couldn't load users right now.", "ru": "⚠️ Не удалось загрузить пользователей."},
@@ -385,4 +410,156 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "⚠️ Что-то пошло не так на моей стороне. Ошибка записана в лог.",
     },
     "error_toast": {"en": "Something went wrong — it's been logged.", "ru": "Что-то пошло не так — ошибка записана."},
+    "blocked": {
+        "en": "This bot isn't available to you.",
+        "ru": 'Этот бот вам недоступен.',
+    },
+    "limit_text": {
+        "en": "You've reached today's limit of {n} messages. It resets at midnight.",
+        "ru": 'Вы достигли дневного лимита — {n} сообщений. Он обнулится в полночь.',
+    },
+    "limit_voice": {
+        "en": "You've reached today's limit of {n} voice notes. It resets at midnight; text messages still work.",
+        "ru": 'Вы достигли дневного лимита — {n} голосовых. Он обнулится в полночь; текстом писать можно.',
+    },
+    "voice_too_long": {
+        "en": 'That recording is too long. Keep voice notes under {s} seconds.',
+        "ru": 'Слишком длинная запись. Голосовые — не длиннее {s} секунд.',
+    },
+    "block_usage": {
+        "en": 'Usage: <code>/block &lt;user_id&gt;</code> · <code>/unblock &lt;user_id&gt;</code>. IDs are in 👥 Users.',
+        "ru": 'Формат: <code>/block &lt;user_id&gt;</code> · <code>/unblock &lt;user_id&gt;</code>. ID есть в 👥 Пользователи.',
+    },
+    "block_self": {
+        "en": "You can't block yourself.",
+        "ru": 'Нельзя заблокировать себя.',
+    },
+    "blocked_done": {
+        "en": "🚫 Blocked <code>{uid}</code>. They can't use the bot any more; their data stays. /unblock {uid} undoes it.",
+        "ru": '🚫 <code>{uid}</code> заблокирован. Пользоваться ботом больше нельзя, данные сохранены. /unblock {uid} — отменить.',
+    },
+    "unblocked_done": {
+        "en": '✅ Unblocked <code>{uid}</code>.',
+        "ru": '✅ <code>{uid}</code> разблокирован.',
+    },
+    "not_blocked": {
+        "en": "<code>{uid}</code> wasn't blocked.",
+        "ru": '<code>{uid}</code> не был заблокирован.',
+    },
+    "hh_none": {
+        "en": "🏠 <b>You're not in a household</b>\n\nA household lets family or flatmates see combined totals: everyone logs their own expenses as usual, and 👨\u200d👩\u200d👧 Family totals adds them up (per person and per category). Individual expenses stay private.\n\nCreate one and share its invite link, or open a link someone sent you.",
+        "ru": '🏠 <b>Вы не состоите в семье</b>\n\nСемья — это общие итоги для близких или соседей: каждый записывает свои расходы как обычно, а 👨\u200d👩\u200d👧 Итоги семьи складывают их (по людям и категориям). Отдельные траты остаются личными.\n\nСоздайте семью и отправьте ссылку-приглашение или откройте ссылку, которую прислали вам.',
+    },
+    "btn_create_household": {
+        "en": '🏠 Create household',
+        "ru": '🏠 Создать семью',
+    },
+    "hh_default_name": {
+        "en": "{name}'s household",
+        "ru": 'Семья {name}',
+    },
+    "hh_you_tag": {
+        "en": ' — you',
+        "ru": ' — вы',
+    },
+    "hh_invite": {
+        "en": '🔗 Invite link — anyone who opens it can join:\n{link}\n🔄 New link turns the old one off.',
+        "ru": '🔗 Ссылка-приглашение — любой, кто её откроет, сможет вступить:\n{link}\n🔄 Новая ссылка отключает старую.',
+    },
+    "btn_new_link": {
+        "en": '🔄 New link',
+        "ru": '🔄 Новая ссылка',
+    },
+    "hh_member_note": {
+        "en": "You see everyone's totals in 👨\u200d👩\u200d👧 Family totals. Only the creator can invite people.",
+        "ru": 'Итоги всех — в 👨\u200d👩\u200d👧 Итоги семьи. Приглашать может только создатель.',
+    },
+    "btn_leave_household": {
+        "en": '🚪 Leave household',
+        "ru": '🚪 Выйти из семьи',
+    },
+    "hh_creator_only": {
+        "en": "Only the household's creator can do that",
+        "ru": 'Это может сделать только создатель семьи',
+    },
+    "hh_created_toast": {
+        "en": 'Household ready',
+        "ru": 'Семья создана',
+    },
+    "hh_new_link_toast": {
+        "en": 'New link ready. The old one no longer works.',
+        "ru": 'Новая ссылка готова. Старая больше не работает.',
+    },
+    "hh_you_were_removed": {
+        "en": 'You were removed from “{name}”. Your expenses are still yours.',
+        "ru": 'Вас удалили из «{name}». Ваши расходы остались у вас.',
+    },
+    "hh_ended_by_creator": {
+        "en": '“{name}” was ended by its creator. Your expenses are still yours.',
+        "ru": 'Создатель распустил «{name}». Ваши расходы остались у вас.',
+    },
+    "hh_leave_confirm": {
+        "en": 'Leave “{name}”? Your expenses stay yours; the others just stop seeing your totals.',
+        "ru": 'Выйти из «{name}»? Ваши расходы останутся у вас — другие просто перестанут видеть ваши итоги.',
+    },
+    "btn_yes_leave": {
+        "en": 'Yes, leave',
+        "ru": 'Да, выйти',
+    },
+    "hh_left": {
+        "en": 'You left “{name}”.',
+        "ru": 'Вы вышли из «{name}».',
+    },
+    "hh_member_left": {
+        "en": '🚪 {who} left “{name}”.',
+        "ru": '🚪 {who} вышел(а) из «{name}».',
+    },
+    "hh_invite_invalid": {
+        "en": "This invite link doesn't work any more. Ask for a new one.",
+        "ru": 'Эта ссылка-приглашение больше не работает. Попросите новую.',
+    },
+    "hh_already_in": {
+        "en": "You're already in “{name}”.",
+        "ru": 'Вы уже в «{name}».',
+    },
+    "hh_in_other": {
+        "en": "You're in “{mine}”. To join “{other}”, first leave or end yours in 🏠 Household, then open the link again.",
+        "ru": 'Вы состоите в «{mine}». Чтобы вступить в «{other}», сначала выйдите из своей семьи (или распустите её) в 🏠 Семья и откройте ссылку снова.',
+    },
+    "hh_join_prompt": {
+        "en": "🏠 <b>Join “{name}”?</b>\n\nCreated by {creator}. Members see each other's totals per person and per category in 👨\u200d👩\u200d👧 Family totals. Individual expenses stay private. You can leave any time.",
+        "ru": '🏠 <b>Вступить в «{name}»?</b>\n\nСоздатель: {creator}. Участники видят итоги друг друга по людям и категориям в 👨\u200d👩\u200d👧 Итоги семьи. Отдельные траты остаются личными. Выйти можно в любой момент.',
+    },
+    "btn_join": {
+        "en": '✅ Join',
+        "ru": '✅ Вступить',
+    },
+    "hh_joined_toast": {
+        "en": 'Joined',
+        "ru": 'Готово',
+    },
+    "hh_joined": {
+        "en": "🏠 You're in <b>{name}</b>. Log expenses as usual; 👨\u200d👩\u200d👧 Family totals shows everyone together.",
+        "ru": '🏠 Вы в <b>{name}</b>. Записывайте расходы как обычно — 👨\u200d👩\u200d👧 Итоги семьи покажут всех вместе.',
+    },
+    "hh_member_joined": {
+        "en": '👋 {who} joined “{name}”.',
+        "ru": '👋 {who} вступил(а) в «{name}».',
+    },
+    "hh_join_cancelled": {
+        "en": "OK, you didn't join.",
+        "ru": 'Хорошо, вы не вступили.',
+    },
+    "help_household": {
+        "en": "\n\n🏠 <b>Household</b> — create one and share its invite link to see combined totals with family or flatmates. Everyone's individual expenses stay private.",
+        "ru": '\n\n🏠 <b>Семья</b> — создайте её и отправьте ссылку-приглашение, чтобы видеть общие итоги с близкими или соседями. Отдельные траты каждого остаются личными.',
+    },
+    "help_limits": {
+        "en": '\n\n⚖️ Daily limits: {text} messages and {voice} voice notes (up to {s} s each). They reset at midnight.',
+        "ru": '\n\n⚖️ Дневные лимиты: {text} сообщений и {voice} голосовых (до {s} с каждое). Обнуляются в полночь.',
+    },
+    "help_privacy": {
+        "en": "\n\n🔒 Your expenses are stored in the bot owner's Google Cloud (BigQuery). 🗑 Delete my data erases them for good.",
+        "ru": '\n\n🔒 Ваши расходы хранятся в Google Cloud (BigQuery) владельца бота. 🗑 Удалить мои данные — удаляет их навсегда.',
+    },
 }

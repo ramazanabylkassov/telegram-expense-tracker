@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.finance.fct_expenses_123456789` (
   source             STRING,              -- text | voice
   raw_input          STRING,              -- original text / voice transcript
   item_label         STRING,              -- item as shown to the user, in their language (added to older tables automatically)
+  confirmed_by       STRING,              -- user (tapped) | auto (saved after AUTO_SAVE_MINUTES with no answer); added automatically
   created_at         TIMESTAMP NOT NULL
 )
 PARTITION BY expense_date
@@ -96,17 +97,21 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.finance.log_interactions` (
 PARTITION BY DATE(event_ts)
 CLUSTER BY user_id, event_type, outcome;
 -- outcome values:
---   text/voice : proposed | no_expense | parse_error | denied
+--   text/voice : proposed | no_expense | parse_error | daily_limit | voice_too_long | blocked
 --   button     : saved | saved_corrected | discarded | category_menu | back
---                | already_handled | not_owner | category_gone | save_error | denied
+--                | already_handled | not_owner | category_gone | save_error | blocked
 --   command    : help | listed | report | report_error | reloaded | reload_error
---                | undone | nothing_to_undo | undo_error | unknown_command | denied
---                | household_prompt | household_status | household_off | family_report
---                | member_added | member_removed | not_owner | bad_args
---   household buttons: household_started | household_declined | member_added | join_ignored
---                | member_removed | household_end_prompt | household_ended
---   other      : unsupported | denied
---   edit       : edit_ignored | denied   (edited messages are never re-processed)
+--                | undone | nothing_to_undo | undo_error | unknown_command | blocked
+--                | household_status | household_none | family_report | not_owner | bad_args
+--                | user_blocked | user_unblocked | not_blocked
+--   /start join_<code>: join_prompt | invite_invalid | already_member | in_other_household
+--   household buttons: household_created | invite_link_reset | member_removed | household_end_prompt
+--                | household_ended | household_leave_prompt | household_left | household_joined
+--                | join_declined | not_creator
+--   shortcut   : shortcut_key_created | shortcut_shown | shortcut_off | shortcut_key_rotated (button)
+--   auto_save  : auto_saved (no answer within AUTO_SAVE_MINUTES) | error (retried next pass)
+--   other      : unsupported | blocked
+--   edit       : edit_ignored | blocked   (edited messages are never re-processed)
 --   any        : error (handler crashed; see error + details.traceback)
 
 ------------------------------------------------------------------------------
@@ -129,7 +134,7 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.finance.dim_users` (
 )
 CLUSTER BY user_id;
 
--- Everyone with their spending this month (household mode: v_expenses_all):
+-- Everyone with their spending this month:
 -- SELECT u.first_name, u.username, u.role, SUM(e.amount) AS spent
 -- FROM `YOUR_PROJECT.finance.dim_users` u
 -- LEFT JOIN `YOUR_PROJECT.finance.v_expenses_all` e
@@ -137,20 +142,39 @@ CLUSTER BY user_id;
 -- GROUP BY 1, 2, 3 ORDER BY spent DESC;
 
 ------------------------------------------------------------------------------
--- Household mode only (off by default). Created when the owner starts a
--- household from the bot (/household, or the prompt shown when someone else
--- messages the bot). Ending the household sets is_active = FALSE for everyone.
+-- Households: anyone can create one (🏠 Household) and invite people with a link.
+-- One household per person at a time. Leaving/ending never deletes expenses.
 ------------------------------------------------------------------------------
-CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.finance.dim_household_members` (
-  user_id       INT64 NOT NULL,
-  display_name  STRING,
-  role          STRING,     -- owner | member
+CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.finance.dim_households` (
+  household_id  STRING NOT NULL,   -- h_<random>
+  name          STRING,            -- "Ann's household"
+  created_by    INT64,             -- Telegram user id of the creator
+  invite_code   STRING,            -- t.me/<bot>?start=join_<invite_code>; replaced by "New link", NULL once ended
   is_active     BOOL,
-  added_by      INT64,
-  added_at      TIMESTAMP,
+  created_at    TIMESTAMP,
   updated_at    TIMESTAMP
 );
--- v_expenses_all = SELECT * FROM `finance.fct_expenses_*`   (household only; _TABLE_SUFFIX = user id)
+
+CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.finance.dim_household_members` (
+  user_id       INT64 NOT NULL,    -- one row per person: their current (or last) household
+  display_name  STRING,
+  role          STRING,            -- owner (created the household) | member
+  is_active     BOOL,
+  added_by      INT64,
+  added_at      TIMESTAMP,         -- when they last joined
+  updated_at    TIMESTAMP,
+  household_id  STRING             -- -> dim_households (added automatically to older tables)
+);
+
+-- A household's totals this month, per person:
+-- SELECT m.display_name, SUM(e.amount) AS spent
+-- FROM `YOUR_PROJECT.finance.dim_household_members` m
+-- JOIN `YOUR_PROJECT.finance.v_expenses_all` e ON e.user_id = m.user_id
+-- WHERE m.household_id = 'h_...' AND m.is_active
+--   AND e.expense_date >= DATE_TRUNC(CURRENT_DATE('Asia/Almaty'), MONTH)
+-- GROUP BY 1 ORDER BY spent DESC;
+
+-- v_expenses_all = SELECT * FROM `finance.fct_expenses_*`   (created with the first household; _TABLE_SUFFIX = user id)
 
 -- Views the bot always creates:
 --   v_spend_variants  = dictionary joined with category names

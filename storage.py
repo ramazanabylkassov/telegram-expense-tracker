@@ -15,11 +15,12 @@ BigQuery       – everything durable:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import secrets
 import sqlite3
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 from google.api_core.exceptions import NotFound
@@ -45,6 +46,10 @@ class PendingStore:
                    payload TEXT NOT NULL,
                    created_at TEXT NOT NULL)"""
         )
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(pending)")}
+        for col, decl in (("chat_id", "INTEGER"), ("message_id", "INTEGER"), ("touched_at", "TEXT")):
+            if col not in cols:  # pending.sqlite3 from an older version
+                self.db.execute(f"ALTER TABLE pending ADD COLUMN {col} {decl}")
         self.db.execute(
             """CREATE TABLE IF NOT EXISTS log_purges (
                    user_id INTEGER NOT NULL,
@@ -75,17 +80,123 @@ class PendingStore:
                    saved_at TEXT NOT NULL,
                    learned TEXT)"""
         )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS upload_keys (
+                   user_id INTEGER PRIMARY KEY,
+                   key_hash TEXT NOT NULL UNIQUE,  -- sha256 of the key; the key itself is only shown once
+                   created_at TEXT NOT NULL)"""
+        )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS usage (
+                   user_id INTEGER NOT NULL,
+                   day TEXT NOT NULL,              -- local date (TIMEZONE)
+                   kind TEXT NOT NULL,             -- text | voice
+                   n INTEGER NOT NULL,
+                   PRIMARY KEY (user_id, day, kind))"""
+        )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS blocked_users (
+                   user_id INTEGER PRIMARY KEY,
+                   blocked_at TEXT NOT NULL)"""
+        )
         self.db.commit()
+
+    # ---- daily limits and blocking -------------------------------------------- #
+
+    def count_use(self, user_id: int, kind: str, day: str) -> int:
+        """Add one use of `kind` today and return today's total, including this one."""
+        self.db.execute(
+            "INSERT INTO usage VALUES (?, ?, ?, 1) "
+            "ON CONFLICT(user_id, day, kind) DO UPDATE SET n = n + 1",
+            (user_id, day, kind),
+        )
+        self.db.execute("DELETE FROM usage WHERE day < date(?, '-7 days')", (day,))  # keep it small
+        self.db.commit()
+        return self.db.execute(
+            "SELECT n FROM usage WHERE user_id = ? AND day = ? AND kind = ?", (user_id, day, kind)
+        ).fetchone()[0]
+
+    def uncount_use(self, user_id: int, kind: str, day: str):
+        """Give a use back (the message never reached the AI)."""
+        self.db.execute(
+            "UPDATE usage SET n = MAX(n - 1, 0) WHERE user_id = ? AND day = ? AND kind = ?", (user_id, day, kind)
+        )
+        self.db.commit()
+
+    def is_blocked(self, user_id: int | None) -> bool:
+        return user_id is not None and self.db.execute(
+            "SELECT 1 FROM blocked_users WHERE user_id = ?", (user_id,)
+        ).fetchone() is not None
+
+    def block(self, user_id: int):
+        self.db.execute("INSERT OR REPLACE INTO blocked_users VALUES (?, ?)", (user_id, _now()))
+        self.db.commit()
+
+    def unblock(self, user_id: int) -> bool:
+        cur = self.db.execute("DELETE FROM blocked_users WHERE user_id = ?", (user_id,))
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def blocked_ids(self) -> set[int]:
+        return {r[0] for r in self.db.execute("SELECT user_id FROM blocked_users")}
+
+    # ---- personal upload keys (iPhone Action Button / Shortcut) -------------- #
+
+    @staticmethod
+    def _hash_key(key: str) -> str:
+        return hashlib.sha256(key.encode()).hexdigest()
+
+    def new_upload_key(self, user_id: int) -> str:
+        """Create (or replace) this person's upload key. The old one stops working at once."""
+        key = "exp_" + secrets.token_urlsafe(24)
+        self.db.execute(
+            "INSERT OR REPLACE INTO upload_keys VALUES (?, ?, ?)", (user_id, self._hash_key(key), _now())
+        )
+        self.db.commit()
+        return key
+
+    def upload_key_created(self, user_id: int) -> str | None:
+        row = self.db.execute("SELECT created_at FROM upload_keys WHERE user_id = ?", (user_id,)).fetchone()
+        return row[0] if row else None
+
+    def user_for_upload_key(self, key: str) -> int | None:
+        if not key:
+            return None
+        row = self.db.execute(
+            "SELECT user_id FROM upload_keys WHERE key_hash = ?", (self._hash_key(key),)
+        ).fetchone()
+        return row[0] if row else None
 
     def add(self, user_id: int, payload: dict) -> str:
         pid = secrets.token_hex(4)
         payload = {**payload, "user_id": user_id}
+        now = _now()
         self.db.execute(
-            "INSERT INTO pending VALUES (?, ?, ?, ?)",
-            (pid, user_id, json.dumps(payload, ensure_ascii=False), _now()),
+            "INSERT INTO pending (id, user_id, payload, created_at, touched_at) VALUES (?, ?, ?, ?, ?)",
+            (pid, user_id, json.dumps(payload, ensure_ascii=False), now, now),
         )
         self.db.commit()
         return pid
+
+    def set_message(self, pid: str, chat_id: int, message_id: int):
+        """Where the proposal was shown, so it can be updated when it auto-saves."""
+        self.db.execute("UPDATE pending SET chat_id = ?, message_id = ? WHERE id = ?", (chat_id, message_id, pid))
+        self.db.commit()
+
+    def touch(self, pid: str):
+        """The person is looking at it (e.g. opened ✏️ Change): restart the auto-save clock."""
+        self.db.execute("UPDATE pending SET touched_at = ? WHERE id = ?", (_now(), pid))
+        self.db.commit()
+
+    def overdue(self, minutes: float) -> list[tuple[str, int, int]]:
+        """Proposals untouched for `minutes`. Only ones whose message we know (so older proposals,
+        made before auto-save existed, are never saved by surprise)."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        return self.db.execute(
+            "SELECT id, chat_id, message_id FROM pending "
+            "WHERE message_id IS NOT NULL AND touched_at IS NOT NULL AND touched_at <= ?",
+            (cutoff,),
+        ).fetchall()
 
     def get(self, pid: str) -> dict | None:
         row = self.db.execute("SELECT payload FROM pending WHERE id = ?", (pid,)).fetchone()
@@ -146,7 +257,8 @@ class PendingStore:
 
     def forget_user(self, user_id: int):
         """Everything this machine keeps about the person: proposals, undo history, settings."""
-        for table in ("pending", "saved", "report_prefs", "user_settings"):
+        # A block is kept on purpose: deleting your data isn't a way around it.
+        for table in ("pending", "saved", "report_prefs", "user_settings", "upload_keys", "usage"):
             self.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
         self.db.commit()
 
@@ -185,6 +297,7 @@ FACT_SCHEMA = [
     bigquery.SchemaField("source", "STRING"),  # text | voice
     bigquery.SchemaField("raw_input", "STRING"),
     bigquery.SchemaField("item_label", "STRING"),  # item name in the user's language at saving time
+    bigquery.SchemaField("confirmed_by", "STRING"),  # user (tapped) | auto (no answer in AUTO_SAVE_MINUTES)
     bigquery.SchemaField("created_at", "TIMESTAMP", mode="REQUIRED"),
 ]
 
@@ -583,7 +696,7 @@ class Warehouse:
         return await asyncio.to_thread(self._expenses, user_id, start, end)
 
 
-def build_row(item: dict, category_id: int, category: str) -> dict:
+def build_row(item: dict, category_id: int, category: str, confirmed_by: str = "user") -> dict:
     return {
         "expense_id": secrets.token_hex(8),
         "user_id": item["user_id"],
@@ -600,6 +713,7 @@ def build_row(item: dict, category_id: int, category: str) -> dict:
         "source": item.get("source"),
         "raw_input": item.get("raw_input"),
         "item_label": item.get("label"),
+        "confirmed_by": confirmed_by,
         "created_at": _now(),
     }
 

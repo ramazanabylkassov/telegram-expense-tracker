@@ -17,11 +17,13 @@ Category: Shopping? (🤖 guess)            ← model's guess, nothing known yet
 
 **✅** saves the expense. **✏️** opens the category list, and picking one saves it straight away. **🗑** discards it. Every save also teaches the dictionary, so the next time *Meloman* comes up, the category is 📖 known.
 
+**No answer for 10 minutes?** The bot saves the expense with its suggested category and edits the message to `✅ Eating out · auto-saved`. Tapping ✏️ restarts the 10 minutes, so you won't lose it mid-pick. Auto-saved rows get `confirmed_by = 'auto'` in BigQuery, and they don't teach the dictionary (only your own taps do). `/undo` works on them as usual. Change the delay with `AUTO_SAVE_MINUTES` in `.env` (`0` turns it off).
+
 **Report view** — the 📊 / 🧾 button under Today · Week · Month switches *your* reports between totals by category and a detailed list of every expense (grouped by day), and stays that way until you tap it again.
 
-`/start` shows a button menu (📅 Today · 📆 Week · 🗓 Month · ↩️ Undo last · 🏷 Categories · 🔄 Reload, plus 🏠 Household for the owner and 👨‍👩‍👧 Family when a household is on). Tapping a button runs the command, and the menu stays in place.
+`/start` shows a button menu (📅 Today · 📆 Week · 🗓 Month · ↩️ Undo last · 🏷 Categories · 🔄 Reload · 🏠 Household, plus 👨‍👩‍👧 Family totals when you're in a household and 👥 Users for the owner). Tapping a button runs the command, and the menu stays in place.
 
-Commands: `/today`, `/week`, `/month`, `/undo` (removes the last saved expense and what it taught the dictionary), `/categories`, `/reload`. In household mode there's also `/household` (owner only) and `/family`.
+Commands: `/today`, `/week`, `/month`, `/undo` (removes the last saved expense and what it taught the dictionary), `/categories`, `/reload`, `/household`, `/family`. The owner also has `/users`, `/block <id>` and `/unblock <id>`.
 
 ## Languages: English and Russian
 
@@ -39,33 +41,106 @@ Then run `/reload`.
 
 To add another language, add its code to `LANGUAGES` in `i18n.py`, add a translation to every entry in `STRINGS`, and add a `name_<code>` column if you want translated category names.
 
+## iPhone Action Button (or any Shortcut)
+
+**Why not just send the recording to the chat?** A Shortcut that posts through the Telegram Bot API (`sendAudio` with the bot token) makes the *bot* the sender, and Telegram never delivers a bot's own messages back to it. So the bot has a small upload endpoint instead. The Shortcut sends the recording straight to the bot, and the usual ✅ / ✏️ / 🗑 proposal appears in your chat.
+
+**1. Turn the endpoint on.** Generate a secret and add it to `.env`:
+```bash
+python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+```
+INGEST_SECRET=<the value printed above>
+# INGEST_PORT=8787   (default)
+```
+Run `pip install -r requirements.txt` (this adds `aiohttp`) and restart. The log shows `Upload endpoint listening on http://127.0.0.1:8787/ingest`. It only listens on your Mac itself.
+
+**2. Give your phone a way to reach your Mac.** Tailscale Funnel is free and gives a fixed HTTPS address:
+- Install Tailscale on the Mac and sign in. Make its command-line tool available (the app's settings have an option to install it, or `brew install tailscale`).
+- Run `tailscale funnel --bg 8787`. The first time, it gives you a link to enable HTTPS and Funnel for your account.
+- You'll get an address like `https://macbook-pro-3.tail1234.ts.net`. Check it from your phone's browser: `https://…ts.net/health` should show `ok`.
+- To stop it: `tailscale funnel off`.
+
+**3. Build the Shortcut** (Shortcuts app → +):
+1. **Record Audio.** Set *Start Recording* to Immediately and *Finish Recording* to On Tap.
+2. **Get Contents of URL.** URL: `https://<your-address>.ts.net/ingest`. Method: **POST**. Headers: `Authorization` = `Bearer <INGEST_SECRET>`. Request Body: **Form**, with one field: key `file`, type **File**, value *Recorded Audio*.
+3. Optional: **Get Dictionary Value** `expenses` → **Show Notification** "Sent ✓".
+
+Then go to Settings → Action Button → Shortcut and pick it. For a text version, use **Dictate Text** and send a form field `text` instead of `file`.
+
+**What the endpoint accepts:** `POST /ingest` takes multipart (`file` and/or `text`), raw `audio/*`, JSON `{"text": "…"}` or `text/plain`, up to 20 MB. The key goes in `Authorization: Bearer …` or `X-Api-Key`.
+
+**Responses:** `200 {"ok": true, "expenses": n, "transcript": "…"}`; `401` wrong key; `413` too large; `415` nothing usable; `500` processing failed (you also get a message in the chat).
+
+Each upload is logged in `log_interactions` as `upload_audio` or `upload_text`, and saved expenses have `source = upload_audio`. If the Mac is asleep, the Shortcut gets a connection error, so nothing is lost silently.
+
+### Sharing the Action Button with other users
+
+Every person gets their **own key**, and the key decides whose chat and table an upload goes to. `INGEST_SECRET` is the owner's key; never share it or a Shortcut that contains it.
+
+**1. Tell the bot its public address** (in `.env`, then restart):
+```
+INGEST_PUBLIC_URL=https://<your-address>.ts.net
+```
+The menu now has a **📲 Action Button** item (also `/shortcut`) for everyone. The first tap creates that person's key and shows it once (only a hash is stored). **🔄 New key** replaces it, and the old key stops working right away. A key also stops working when its person is blocked or deletes their data. Uploads count towards the person's daily limits.
+
+**2. Optional but much easier: a one-tap Shortcut link.** Make a shareable copy of your Shortcut that asks for the key on install:
+1. In Shortcuts, duplicate your Action Button Shortcut and name the copy **Log expense**.
+2. At the very top, add a **Text** action containing `PASTE-YOUR-KEY`.
+3. In **Get Contents of URL**, change the `Authorization` header value to `Bearer ` followed by the **Text** variable (tap the value field, type `Bearer `, then pick *Text* from the variables bar).
+4. Open the copy's settings (ⓘ) → **Setup** → **Add Import Question**. Pick the Text action and ask "Paste the key the bot gave you".
+5. Run it once with your own key to check it, then set the Text back to `PASTE-YOUR-KEY`.
+6. Share → **Copy iCloud Link**, and add it to `.env`:
+```
+SHORTCUT_URL=https://www.icloud.com/shortcuts/…
+# SHORTCUT_NAME=Log expense   (default; the name the bot tells people to pick)
+```
+Now a member's **📲 Action Button** message reads: open the link → Add Shortcut → paste your key → Settings → Action Button → pick *Log expense*. Without `SHORTCUT_URL`, the bot shows the manual build steps with the URL filled in instead.
+
 ## Delete my data
 
 Everyone has **🗑 Delete my data** in the menu (or `/delete_my_data`). It's two steps: a warning that says how many expenses will go, then typing `DELETE` (or `УДАЛИТЬ`) within 5 minutes. Any other message cancels.
 
-**What's deleted:** the person's `fct_expenses_<id>` table, their `dim_users` row, their rows in `log_interactions`, their join request, and everything on the bot's machine (unconfirmed proposals, undo history, language and report settings, unsent log rows).
+**What's deleted:** the person's `fct_expenses_<id>` table, their `dim_users` row, their rows in `log_interactions`, their household membership (a creator's household is ended; nobody else's expenses are touched), their upload key, and everything on the bot's machine (unconfirmed proposals, undo history, language and report settings, unsent log rows).
 
-**What stays:** shared categories and `dim_spend_variants`. The dictionary only holds anonymous counts ("starbucks → Eating out"), nothing tied to a person. Household membership also stays; the owner removes members with `/household`.
+**What stays:** shared categories and `dim_spend_variants`. The dictionary only holds anonymous counts ("starbucks → Eating out"), nothing tied to a person. A block by the owner also stays, so deleting data isn't a way around it.
 
 **The interaction log:** BigQuery can't delete rows streamed in the last ~30–90 minutes. Older rows go straight away, and the rest are retried every 30 minutes (queue in `pending.sqlite3`, table `log_purges`) until a clean pass. That usually takes under 2 hours. The confirmation message itself is never logged.
 
 **Recovery:** none from the bot. BigQuery time travel can restore a dropped table for 7 days, by hand.
 
-## Household mode (off by default)
+## Who can use the bot
 
-Out of the box the bot is **private to you** (`OWNER_USER_ID`). Nothing household-related exists in BigQuery.
+**Anyone.** Whoever finds the bot can start logging straight away. Each person gets their own `fct_expenses_<id>` table, and everyone shares the category dictionary.
 
-**The prompt to start one appears when it's needed:**
-- **Someone else messages the bot.** They're told it's private, and you get a notification: *"Aigerim wants to use the bot. Start a household to let them in?"* with **🏠 Start household & add** and **Ignore** buttons. You're notified at most once a day per person.
-- **You send `/household`.** You get the same prompt, with **🏠 Start household** and **Not now**.
+**The owner** (`OWNER_USER_ID`, you) has no limits, sees **👥 Users** (everyone, most active first, with their IDs) and can block people.
 
-**Once the household is started:**
-- Each member logs into their own `fct_expenses_<id>` table, and the category dictionary is shared.
-- `/family [today|week|month]` shows totals per person and per category, for every member.
-- `/household` lists members with **Remove** buttons and an **End household** button, which asks for confirmation. You can also add someone directly with `/household add <telegram_id> <name>`.
-- Ending the household removes members' access. Everyone's expenses stay in BigQuery.
+**Daily limits** protect your AI credits and your Mac. Only messages that go to the AI count, however many expenses they hold. The limits reset at midnight in `TIMEZONE`, and `0` turns a limit off:
 
-Household state is stored in BigQuery (`dim_household_members`), so it survives moving the bot to another machine.
+| `.env` | Default | What it limits |
+|---|---|---|
+| `DAILY_TEXT_LIMIT` | 50 | Text messages (and text uploads) per person per day |
+| `DAILY_VOICE_LIMIT` | 30 | Voice notes (and audio uploads) per person per day |
+| `MAX_VOICE_SECONDS` | 120 | Length of one voice note. For uploads, the file size stands in for it (~32 KB per second) |
+
+Someone over a limit gets a short message saying when it resets, and the AI isn't called. Counts are kept in `pending.sqlite3` (table `usage`, last 7 days).
+
+**Blocking:** `/block <id>` stops someone using the bot, including buttons and their Action Button key. Their data stays. `/unblock <id>` undoes it. IDs are shown in 👥 Users. Blocks are stored in `pending.sqlite3` (`blocked_users`).
+
+**Privacy:** ❓ How it works tells people their expenses are stored in your Google Cloud and that 🗑 Delete my data erases them. You can read everyone's tables in BigQuery, so run a public bot only if you're comfortable being responsible for that data.
+
+## Households
+
+A household is a group (a family, flatmates) that sees **combined totals**. Anyone can create one. A person can be in **one household at a time**.
+
+- **Create:** 🏠 Household → **Create household**. It's named after its creator ("Ann's household" / "Семья Ann").
+- **Invite:** the creator's 🏠 Household view shows an invite link like `https://t.me/<bot>?start=join_<code>`. Opening it shows *"Join “Ann's household”?"* with ✅ Join / Cancel. Someone opening the bot for the first time through the link also gets the intro and the ▶️ Start button. **🔄 New link** turns the old link off.
+- **Together:** everyone keeps logging into their own table. **👨‍👩‍👧 Family totals** (`/family [today|week|month]`) shows the household's totals per person and per category. Individual expenses aren't shown to other members.
+- **Manage (creator only):** **Remove** a member, **🔄 New link**, **End household**, which asks for confirmation. Members can **🚪 Leave**. The people affected get a short message each time.
+- **Nothing is deleted:** leaving, removal and ending never touch anyone's expenses.
+- **Already in one?** Opening another household's link says to leave or end the current one first.
+
+State is stored in BigQuery (`dim_households`, `dim_household_members`) and cached in memory. On first start after upgrading, the old single household (you plus the members you added) becomes a regular household with you as its creator, and its members keep their access.
 
 ## Data model (BigQuery, dataset `finance`)
 
@@ -74,10 +149,11 @@ Household state is stored in BigQuery (`dim_household_members`), so it survives 
 | `fct_expenses_<telegram_user_id>` | one per user | One row per confirmed expense: amount, currency, date, category, merchant, the raw input, what was suggested and whether it was corrected. Partitioned by `expense_date`. |
 | `dim_categories` | shared | The category list: `category_id`, `name`, `description` (guidance for the model), `sort_order`, `is_active`. |
 | `dim_spend_variants` | shared | The dictionary: every merchant (`starbucks`, `yandex go`) and item (`coffee`, `taxi`) ever confirmed, with its category and `confirmations` / `corrections` counts. |
-| `dim_users` | shared | One row per Telegram user who ever wrote to the bot: name, @username, Telegram app language, language chosen in the bot, role (`owner` / `member` / `none`), first and last seen. Updated when something changes (at most hourly for `last_seen_at`); filled from the interaction log on first start. |
-| `log_interactions` | shared | One row per update the bot receives: every text, voice note, command and button tap, including denied and unsupported ones. Records who sent it, what they sent, the transcript, the outcome (`proposed`, `saved`, `saved_corrected`, `discarded`, `denied`, `error`, …), the linked `expense_id`, the AI provider and model, latency, and the error with its traceback. Partitioned by day. |
-| `dim_household_members` | household only | Who may use the bot: `user_id`, `display_name`, `role` (owner/member), `is_active`. Created when a household is started. |
-| `v_expenses_all` | household only | View over all members' fact tables (`fct_expenses_*`). |
+| `dim_users` | shared | One row per Telegram user who ever wrote to the bot: name, @username, Telegram app language, language chosen in the bot, role (`owner` = you, `household_owner`, `member`, `none`, `blocked`), first and last seen. Updated when something changes (at most hourly for `last_seen_at`); filled from the interaction log on first start. |
+| `log_interactions` | shared | One row per update the bot receives: every text, voice note, command and button tap, including blocked and unsupported ones. Records who sent it, what they sent, the transcript, the outcome (`proposed`, `saved`, `saved_corrected`, `discarded`, `denied`, `error`, …), the linked `expense_id`, the AI provider and model, latency, and the error with its traceback. Partitioned by day. |
+| `dim_households` | shared | One row per household: `household_id`, `name`, `created_by`, the current `invite_code`, `is_active`. |
+| `dim_household_members` | shared | One row per person who has been in a household: `user_id`, `display_name`, `household_id`, `role` (owner = created it / member), `is_active`. |
+| `v_expenses_all` | view | Everyone's fact tables together (`fct_expenses_*`); family totals join it to the members of one household. |
 | `v_spend_variants` | view | The dictionary with category names. |
 
 **Interaction log:** every handler is wrapped, so each update produces exactly one row, even when the handler crashes. Rows are buffered and streamed to BigQuery every 5 seconds in the background, so logging never slows down a reply. If BigQuery is unreachable, rows are retried for about 5 minutes, then appended to `interaction_log_failed.jsonl` so nothing is lost. `pending_ids` links a proposal message to the button taps on it. `schema.sql` has funnel, error and trace queries.
@@ -117,7 +193,7 @@ On first start the bot creates and seeds everything: 13 categories and about 70 
    pip install -r requirements.txt
    python bot.py
    ```
-   Message the bot. It replies with your Telegram user ID. Put it in `OWNER_USER_ID` and restart. The bot is now yours alone. To share it later, see *Household mode*.
+   Message the bot. It replies with your Telegram user ID. Put it in `OWNER_USER_ID` and restart. Anyone else can use the bot within the daily limits; see *Who can use the bot*.
 6. **Run it in the background.** It then starts at login and restarts if it crashes:
    ```bash
    bash mac/install.sh     # logs: tail -f ~/Library/Logs/expense-bot.log
@@ -127,7 +203,7 @@ On first start the bot creates and seeds everything: 13 categories and about 70 
 ## Cost
 
 - **BigQuery:** $0 in practice. A few KB of data a day and tiny queries stay far inside the always-free 10 GB of storage and 1 TB of queries a month. The interaction log uses streaming inserts, which are billed at $0.01 per 200 MB. At about 1 KB per interaction, that's fractions of a cent a year. Billing must still be *enabled*, because the dictionary updates (`MERGE`) and `/undo` (`DELETE`) are DML, which the no-billing sandbox refuses. A $1 budget alert is a good safety net.
-- **AI:** $0 with Gemini's free tier, or about $1–2 a month with Claude Haiku or ChatGPT.
+- **AI:** $0 with Gemini's free tier, or about $1–2 a month with Claude Haiku or ChatGPT for one person. A public bot costs that per active user; the daily limits cap the worst case. On Haiku a message costs roughly half a cent (the prompt carries the category list and dictionary examples), so someone using all 50 messages costs about $0.25 that day. Lower `DAILY_TEXT_LIMIT` if strangers find the bot. Local Whisper voice runs on your Mac, so many voice users means a busy Mac.
 - **Hosting:** your Mac. Telegram holds messages for up to 24 hours while the Mac sleeps, and each expense is still dated by when you sent it.
 
 ## Files
@@ -138,7 +214,7 @@ On first start the bot creates and seeds everything: 13 categories and about 70 
 | `catalog.py` | Shared categories + dictionary: cache, lookup, learning |
 | `users.py` | `dim_users`: who's who, kept current from every interaction |
 | `i18n.py` | All user-facing text in English and Russian, date formats, Telegram command menus |
-| `household.py` | Optional household mode: members, join requests, `/family` totals |
+| `household.py` | Households: create, invite links, join/leave/remove/end, `/family` totals |
 | `interactions.py` | Interaction log: per-update record, background streaming to BigQuery |
 | `extractor.py` | Prompt, JSON schema and validation for Gemini / Claude / OpenAI |
 | `transcribe.py` | Voice → text for Claude/ChatGPT (local Whisper or OpenAI) |

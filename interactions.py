@@ -12,6 +12,7 @@ retried, and after that appended to a local JSONL file so nothing is lost.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import json
@@ -224,6 +225,42 @@ _logger: InteractionLogger | None = None
 def set_logger(logger: InteractionLogger):
     global _logger
     _logger = logger
+
+
+@contextlib.asynccontextmanager
+async def record(event_type: str, user_id: int | None, chat_id: int | None = None, **fields):
+    """Log something that isn't a Telegram update (e.g. an Action Button upload): exactly one row,
+    and note() works inside it just like inside a @logged handler."""
+    rec: dict = {
+        "event_id": secrets.token_hex(8),
+        "event_ts": _ts(None),
+        "user_id": user_id,
+        "chat_id": chat_id,
+        "chat_type": "upload",
+        "event_type": event_type,
+        "llm_provider": config.LLM_PROVIDER,
+        "llm_model": _model_name(),
+        "details": {},
+        **fields,
+    }
+    token = _current.set(rec)
+    t0 = time.perf_counter()
+    try:
+        yield rec
+    except Exception as e:
+        rec.setdefault("outcome", "error")  # keep a more specific outcome (e.g. parse_error) if one was noted
+        rec.setdefault("error", f"{type(e).__name__}: {e}"[:1000])
+        rec["details"]["traceback"] = traceback.format_exc()[-4000:]
+        raise
+    finally:
+        rec["latency_ms"] = int((time.perf_counter() - t0) * 1000)
+        rec.setdefault("outcome", "handled")
+        _current.reset(token)
+        if _logger is not None:
+            try:
+                _logger.emit(rec)
+            except Exception:
+                log.exception("Could not queue interaction log row")
 
 
 def logged(event_type: str):
