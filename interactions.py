@@ -54,6 +54,9 @@ LOG_SCHEMA = [
     bigquery.SchemaField("llm_provider", "STRING"),
     bigquery.SchemaField("llm_model", "STRING"),
     bigquery.SchemaField("latency_ms", "INT64"),
+    bigquery.SchemaField("llm_input_tokens", "INT64"),  # tokens sent to the AI for this interaction
+    bigquery.SchemaField("llm_output_tokens", "INT64"),  # tokens it answered with
+    bigquery.SchemaField("audio_seconds", "FLOAT64"),  # audio transcribed by local Whisper
     bigquery.SchemaField("error", "STRING"),
     bigquery.SchemaField("details", "JSON"),  # anything else worth keeping
 ]
@@ -146,7 +149,12 @@ class InteractionLogger:
         table = bigquery.Table(self.table_id, schema=LOG_SCHEMA)
         table.time_partitioning = bigquery.TimePartitioning(field="event_ts")
         table.clustering_fields = ["user_id", "event_type", "outcome"]
-        self.client.create_table(table, exists_ok=True)
+        table = self.client.create_table(table, exists_ok=True)
+        have = {f.name for f in table.schema}
+        missing = [f for f in LOG_SCHEMA if f.name not in have]
+        if missing:  # table from an older version: add the new columns (streamed rows need them first)
+            table.schema = list(table.schema) + missing
+            self.client.update_table(table, ["schema"])
 
     def emit(self, rec: dict):
         rec["logged_at"] = _ts(None)

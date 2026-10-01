@@ -130,6 +130,11 @@ class PendingStore:
                    PRIMARY KEY (chat_id, message_id))"""
         )
         self.db.execute(
+            """CREATE TABLE IF NOT EXISTS outages (
+                   started_at TEXT NOT NULL,       -- first failed attempt to reach Telegram (UTC)
+                   ended_at TEXT)                  -- first update received afterwards; NULL = still down"""
+        )
+        self.db.execute(
             """CREATE TABLE IF NOT EXISTS deletions (
                    user_id INTEGER NOT NULL,
                    deleted_at TEXT NOT NULL,       -- when they confirmed "delete my data" (UTC)
@@ -247,6 +252,22 @@ class PendingStore:
         ).fetchone()
         return (*row[:3], json.loads(row[3]) if row[3] else None) if row else None
 
+    # ---- Telegram outages (for 🖥 App status) ----------------------------------- #
+
+    def outage_started(self, at: str):
+        self.db.execute("INSERT INTO outages VALUES (?, NULL)", (at,))
+        self.db.commit()
+
+    def outage_ended(self, at: str):
+        self.db.execute("UPDATE outages SET ended_at = ? WHERE ended_at IS NULL", (at,))
+        self.db.commit()
+
+    def outages_since(self, since: str) -> list[tuple[str, str | None]]:
+        return self.db.execute(
+            "SELECT started_at, ended_at FROM outages WHERE started_at >= ? OR ended_at IS NULL OR ended_at >= ? "
+            "ORDER BY started_at", (since, since)
+        ).fetchall()
+
     # ---- daily limits and blocking -------------------------------------------- #
 
     def count_use(self, user_id: int, kind: str, day: str) -> int:
@@ -323,6 +344,16 @@ class PendingStore:
         )
         self.db.commit()
         return pid
+
+    def update(self, pid: str, **changes) -> dict | None:
+        """Change fields of a waiting proposal (e.g. ✏️ switched it from expense to income)."""
+        item = self.get(pid)
+        if item is None:
+            return None
+        item.update(changes)
+        self.db.execute("UPDATE pending SET payload = ? WHERE id = ?", (json.dumps(item, ensure_ascii=False), pid))
+        self.db.commit()
+        return item
 
     def set_message(self, pid: str, chat_id: int, message_id: int):
         """Where the proposal was shown, so it can be updated when it auto-saves."""
@@ -491,6 +522,9 @@ FACT_SCHEMA = [
     bigquery.SchemaField("raw_input", "STRING"),
     bigquery.SchemaField("item_label", "STRING"),  # item name in the user's language at saving time
     bigquery.SchemaField("confirmed_by", "STRING"),  # user (tapped) | auto (no answer in AUTO_SAVE_MINUTES)
+    # expense | income | saving (put aside) | withdrawal (taken out of savings). NULL = expense (older rows).
+    bigquery.SchemaField("kind", "STRING"),
+    bigquery.SchemaField("goal_id", "STRING"),  # dim_savings_goals.goal_id for savings/withdrawals towards a goal
     bigquery.SchemaField("created_at", "TIMESTAMP", mode="REQUIRED"),
 ]
 
@@ -579,6 +613,22 @@ class Warehouse:
             table.schema = [*table.schema, *[bigquery.SchemaField(f.name, f.field_type) for f in missing]]
             self.client.update_table(table, ["schema"])
             log.info("%s: added columns %s", table.table_id, [f.name for f in missing])
+        return bool(missing)
+
+    def migrate_fact_tables(self) -> int:
+        """Give every existing fct_expenses_* table the columns added since it was created. Needed at
+        startup: a wildcard query (family totals) uses the newest table's schema, and a query naming
+        `kind` must find it in every table. Metadata only, so free. Returns how many tables changed."""
+        changed = 0
+        for t in self.client.list_tables(self.ds):
+            name = t.table_id
+            if not name.startswith(config.FACT_TABLE_PREFIX) or not name[len(config.FACT_TABLE_PREFIX):].isdigit():
+                continue
+            uid = int(name[len(config.FACT_TABLE_PREFIX):])
+            if self._add_missing_fact_columns(uid):
+                changed += 1
+            self._fact_tables_ready.add(uid)
+        return changed
 
     def _count(self, table: str) -> int:
         return next(iter(self.client.query(f"SELECT COUNT(*) AS n FROM `{table}`").result())).n
@@ -881,12 +931,15 @@ class Warehouse:
         return job.num_dml_affected_rows or 0
 
     def _totals(self, user_id: int, start: date, end: date) -> list[tuple[int, str, str, Decimal]]:
-        """(category_id, category name as saved, currency, total) — the bot shows the name in the user's language."""
+        """(category_id, category name as saved, currency, total) of expenses only (not income or savings)
+        — the bot shows the name in the user's language."""
+        if user_id not in self._fact_tables_ready:
+            self._ready_if_exists(user_id)
         try:
             rows = self.client.query(
                 f"""SELECT category_id, ANY_VALUE(category) AS category, currency, SUM(amount) AS total
                     FROM `{self.fact_table(user_id)}`
-                    WHERE expense_date BETWEEN @start AND @end
+                    WHERE expense_date BETWEEN @start AND @end AND {EXPENSES_ONLY}
                     GROUP BY category_id, currency
                     ORDER BY total DESC""",
                 job_config=bigquery.QueryJobConfig(
@@ -921,7 +974,8 @@ class Warehouse:
             self._add_missing_fact_columns(user_id)
             self._fact_tables_ready.add(user_id)
         rows = self.client.query(
-            f"""SELECT expense_id, expense_date, amount, currency, category_id, category, description, item_label, merchant
+            f"""SELECT expense_id, expense_date, amount, currency, category_id, category, description, item_label, merchant,
+                       IFNULL(kind, 'expense') AS kind, goal_id
                 FROM `{self.fact_table(user_id)}`
                 WHERE expense_date BETWEEN @start AND @end
                 ORDER BY expense_date DESC, created_at DESC""",
@@ -937,8 +991,48 @@ class Warehouse:
     async def expenses(self, user_id: int, start: date, end: date) -> list[dict]:
         return await asyncio.to_thread(self._expenses, user_id, start, end)
 
+    def _money_flow(self, user_id: int, start: date, end: date) -> list[dict]:
+        """Per kind, goal and currency: the total within [start, end] and the all-time total
+        (savings balances need all time). One small query."""
+        try:
+            rows = self.client.query(
+                f"""SELECT IFNULL(kind, 'expense') AS kind, goal_id, currency,
+                           SUM(IF(expense_date BETWEEN @start AND @end, amount, 0)) AS period_total,
+                           SUM(amount) AS all_time
+                    FROM `{self.fact_table(user_id)}`
+                    GROUP BY 1, 2, 3""",
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("start", "DATE", start),
+                        bigquery.ScalarQueryParameter("end", "DATE", end),
+                    ]
+                ),
+            ).result()
+        except NotFound:
+            return []
+        return [dict(r.items()) for r in rows]
+
+    async def money_flow(self, user_id: int, start: date, end: date) -> list[dict]:
+        if user_id not in self._fact_tables_ready:
+            await asyncio.to_thread(self._ready_if_exists, user_id)
+        return await asyncio.to_thread(self._money_flow, user_id, start, end)
+
+    def _ready_if_exists(self, user_id: int):
+        try:
+            self._add_missing_fact_columns(user_id)
+            self._fact_tables_ready.add(user_id)
+        except NotFound:
+            pass
+
+
+# Rows written before savings existed have kind NULL: they are expenses.
+EXPENSES_ONLY = "IFNULL(kind, 'expense') = 'expense'"
+
 
 def build_row(item: dict, category_id: int, category: str, confirmed_by: str = "user") -> dict:
+    kind = item.get("kind") or "expense"
+    suggested_kind = item.get("ai_kind") or kind
+    corrected = kind != suggested_kind or (kind == "expense" and category_id != item["category_id"])
     return {
         "expense_id": secrets.token_hex(8),
         "user_id": item["user_id"],
@@ -951,11 +1045,13 @@ def build_row(item: dict, category_id: int, category: str, confirmed_by: str = "
         "merchant": item.get("merchant"),
         "suggested_category": item["category"],
         "suggestion_source": item.get("suggestion_source"),
-        "was_corrected": category_id != item["category_id"],
+        "was_corrected": corrected,
         "source": item.get("source"),
         "raw_input": item.get("raw_input"),
         "item_label": item.get("label"),
         "confirmed_by": confirmed_by,
+        "kind": kind,
+        "goal_id": item.get("goal_id") if kind in ("saving", "withdrawal") else None,
         "created_at": _now(),
     }
 

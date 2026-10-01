@@ -231,6 +231,7 @@ class Households:
         JOIN `{self.table}` m
           ON m.user_id = e.user_id AND IFNULL(m.is_active, FALSE) AND m.household_id = @hid
         WHERE e.expense_date BETWEEN @start AND @end
+          AND IFNULL(e.kind, 'expense') = 'expense'  -- income and savings stay personal
         GROUP BY member, category_id, currency
         ORDER BY total DESC
         """

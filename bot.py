@@ -13,7 +13,6 @@ from decimal import Decimal
 from telegram import (
     BotCommand,
     BotCommandScopeChat,
-    ForceReply,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
@@ -25,6 +24,7 @@ from telegram.error import BadRequest, NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -36,9 +36,10 @@ import config
 import dashboard
 import extractor
 import i18n
+import savings
 from catalog import Catalog
 from household import Households
-from i18n import fmt_day, fmt_month, t
+from i18n import fmt_date, fmt_day, fmt_month, t
 from interactions import InteractionLogger, logged, note, record, set_logger
 from storage import PendingStore, Warehouse, build_row
 from users import UserDirectory
@@ -51,6 +52,7 @@ pending = PendingStore()
 warehouse = Warehouse()
 catalog = Catalog(warehouse)
 household = Households(warehouse)
+goals = savings.Goals(warehouse)
 users = UserDirectory(warehouse.client, warehouse.ds)
 context_flags: dict = {}
 
@@ -166,10 +168,68 @@ def fmt_item(item: dict, lang: str) -> str:
     return line
 
 
+def kind_of(item: dict) -> str:
+    return item.get("kind") or "expense"
+
+
+def kind_label(kind: str, lang: str) -> str:
+    return f"{savings.ICONS[kind]} {t(lang, 'kind_' + kind)}"
+
+
+def goal_suffix(goal_id: str | None, lang: str) -> str:
+    g = goals.get(goal_id)
+    return f" → 🎯 {g.name}" if g else ""
+
+
+def shown_as(item: dict, category_id: int, category_name: str, lang: str) -> str:
+    """What a saved record is filed under, for the user: its category, or its kind (and goal)."""
+    kind = kind_of(item)
+    if kind == "expense":
+        return category_label(category_id, category_name, lang)
+    return kind_label(kind, lang) + goal_suffix(item.get("goal_id"), lang)
+
+
 def proposal_text(item: dict, lang: str) -> str:
+    kind = kind_of(item)
+    if kind != "expense":
+        what = html.escape(kind_label(kind, lang) + goal_suffix(item.get("goal_id"), lang))
+        return f"{fmt_item(item, lang)}\n" + t(lang, "kind_question", kind=what, tag=t(lang, "tag_guess"))
     tag = t(lang, "tag_known") if item.get("suggestion_source") == "dictionary" else t(lang, "tag_guess")
     cat = category_label(item.get("category_id"), item["category"], lang)
     return f"{fmt_item(item, lang)}\n" + t(lang, "category_question", cat=html.escape(cat), tag=tag)
+
+
+def kind_buttons(pid: str, lang: str, current: str) -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton(kind_label(k, lang), callback_data=f"k:{pid}:{k}")
+            for k in savings.KINDS if k != current]
+
+
+def change_keyboard(pid: str, item: dict, lang: str) -> InlineKeyboardMarkup:
+    """✏️ on a proposal. Spending: the categories, then "it's actually income / savings…".
+    Anything else: the other kinds, and for savings/withdrawals which goal."""
+    kind = kind_of(item)
+    if kind == "expense":
+        rows = list(category_keyboard(pid, lang).inline_keyboard[:-1])
+    else:
+        rows = []
+        if kind in ("saving", "withdrawal"):
+            rows += goal_rows(pid, item, lang)
+    kb = kind_buttons(pid, lang, kind)
+    rows += [kb[i : i + 2] for i in range(0, len(kb), 2)]
+    rows.append([InlineKeyboardButton(t(lang, "btn_back"), callback_data=f"bk:{pid}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def goal_rows(pid: str, item: dict, lang: str) -> list[list[InlineKeyboardButton]]:
+    mine = goals.of(item["user_id"])
+    if not mine:
+        return []
+    current = item.get("goal_id")
+    buttons = [InlineKeyboardButton(("✓ " if g.goal_id == current else "") + f"🎯 {g.name}",
+                                    callback_data=f"g:{pid}:{g.goal_id}") for g in mine]
+    buttons.append(InlineKeyboardButton(("✓ " if not current else "") + t(lang, "btn_no_goal"),
+                                        callback_data=f"g:{pid}:-"))
+    return [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
 
 
 def confirm_keyboard(pid: str, lang: str) -> InlineKeyboardMarkup:
@@ -216,6 +276,41 @@ async def allowed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
             await msg.reply_text(t(lang_for(user), "blocked"))
         return False
     return True
+
+
+# Telegram answers that aren't errors: a button tap answered too late (it waited while the Mac slept
+# or the bot restarted), or an edit that would leave the message exactly as it is (a double tap).
+_HARMLESS = ("message is not modified", "query is too old", "query id is invalid")
+
+
+def _harmless(e: Exception) -> bool:
+    return isinstance(e, BadRequest) and any(s in str(e).lower() for s in _HARMLESS)
+
+
+async def answer(query, *args, **kwargs):
+    """query.answer(), except a late answer is skipped instead of failing the whole tap."""
+    try:
+        return await query.answer(*args, **kwargs)
+    except BadRequest as e:
+        if not _harmless(e):
+            raise
+        log.info("Button answered too late, skipped: %s", e)
+
+
+async def edit_text(query, *args, **kwargs):
+    try:
+        return await query.edit_message_text(*args, **kwargs)
+    except BadRequest as e:
+        if not _harmless(e):
+            raise
+
+
+async def edit_markup(query, *args, **kwargs):
+    try:
+        return await query.edit_message_reply_markup(*args, **kwargs)
+    except BadRequest as e:
+        if not _harmless(e):
+            raise
 
 
 def display_name(user) -> str:
@@ -273,6 +368,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         # a reply to a 🎙 transcript or its fix prompt = a corrected transcript
         vn = pending.voice_note_for_reply(uid, update.effective_chat.id, reply_to.message_id)
+    awaiting = context.user_data.pop("awaiting", None)
+    if vn is None and isinstance(awaiting, dict) and awaiting.get("until", 0) > time.monotonic():
+        if awaiting["kind"] == "lines" and re.search(r"\d", msg.text or ""):
+            if not await ask_delete_lines(update, awaiting["id"], msg.text, lang):
+                context.user_data["awaiting"] = awaiting  # let them try again
+            return
+        if awaiting["kind"] == "fix":
+            found = pending.voice_note(awaiting["id"])
+            if found and found["user_id"] == uid:
+                vn = found
+        if awaiting["kind"] == "goal":
+            limit = over_limit(uid, "text")  # the goal is read by the AI too
+            if limit:
+                note(outcome="daily_limit", limit=limit)
+                await msg.reply_text(t(lang, "limit_text", n=limit))
+                return
+            await create_goal(update, context, msg.text, lang)
+            return
+        # anything else (e.g. words instead of line numbers): an ordinary message
     limit = over_limit(uid, "text")
     if limit:
         note(outcome="daily_limit", limit=limit)
@@ -285,7 +399,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.effective_message.text
     try:
         result = await extractor.parse(
-            text=text, sent_at=update.effective_message.date, ctx=await mapping_context(lang)
+            text=text, sent_at=update.effective_message.date, ctx=await mapping_context(lang, uid)
         )
     except Exception as e:
         log.exception("Parsing failed")
@@ -321,7 +435,7 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
             audio=audio,
             audio_mime=voice.mime_type or "audio/ogg",
             sent_at=update.effective_message.date,
-            ctx=await mapping_context(lang),
+            ctx=await mapping_context(lang, uid),
         )
     except Exception as e:
         log.exception("Voice parsing failed")
@@ -332,11 +446,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   sent_at=update.effective_message.date)
 
 
-async def mapping_context(lang: str) -> extractor.MappingContext:
-    """The shared dictionary, as the model sees it on every mapping."""
+async def mapping_context(lang: str, user_id: int | None = None) -> extractor.MappingContext:
+    """The shared dictionary (plus the person's own savings goals), as the model sees it on every mapping."""
     await catalog.refresh_if_stale()
     return extractor.MappingContext(
-        categories=catalog.names, guide=catalog.category_guide(), examples=catalog.examples(), language=lang
+        categories=catalog.names, guide=catalog.category_guide(), examples=catalog.examples(), language=lang,
+        goals=[g.name for g in goals.of(user_id)] if user_id is not None else [],
     )
 
 
@@ -382,9 +497,11 @@ async def propose_to(send, user_id: int, result: extractor.ParseResult, source: 
         return 0
     pids, proposals = [], []
     for exp in result.expenses:
-        # A variant users already confirmed beats the model's fresh guess.
-        known = catalog.match(exp.merchant, exp.description)
+        # A variant users already confirmed beats the model's fresh guess (spending only: income and
+        # savings never go through the dictionary).
+        known = catalog.match(exp.merchant, exp.description) if exp.kind == "expense" else None
         category = known or catalog.by_name(exp.category) or catalog.fallback()
+        goal = goals.by_name(user_id, exp.goal)
         payload = {
             "amount": str(exp.amount),
             "currency": exp.currency,
@@ -398,6 +515,9 @@ async def propose_to(send, user_id: int, result: extractor.ParseResult, source: 
             "suggestion_source": "dictionary" if known else "ai",
             "source": source,
             "raw_input": raw_input,
+            "kind": exp.kind,
+            "ai_kind": exp.kind,
+            "goal_id": goal.goal_id if goal else None,
         }
         if gid:
             payload["group"] = gid  # the transcript it came from, so a correction can withdraw it
@@ -405,7 +525,7 @@ async def propose_to(send, user_id: int, result: extractor.ParseResult, source: 
         pids.append(pid)
         proposals.append(
             {k: payload[k] for k in ("amount", "currency", "description", "label", "merchant", "expense_date",
-                                     "category", "ai_category", "suggestion_source")}
+                                     "category", "ai_category", "suggestion_source", "kind", "goal_id")}
         )
         shown = await send(proposal_text(payload, lang), parse_mode=ParseMode.HTML, reply_markup=confirm_keyboard(pid, lang))
         if is_message_id(shown):
@@ -430,19 +550,27 @@ async def handle_fix_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = ulang(update)
     uid = query.from_user.id
     gid = query.data.split(":", 1)[1]
+    if gid == "cancel":
+        context.user_data.pop("awaiting", None)
+        note(outcome="fix_cancelled")
+        await answer(query)
+        await edit_text(query, t(lang, "fix_cancelled"))
+        return
     vn = pending.voice_note(gid)
     note(voice_note=gid)
     if vn is None or vn["user_id"] != uid:
         note(outcome="fix_gone")
-        await query.answer(t(lang, "fix_gone"), show_alert=True)
+        await answer(query, t(lang, "fix_gone"), show_alert=True)
         return
     for pid, _, _ in pending.pending_in_group(uid, gid):
         pending.touch(pid)  # they're fixing it: don't auto-save the misheard version meanwhile
-    await query.answer()
+    await answer(query)
+    # Wait for their next message. (Not ForceReply: that replaces the pinned ▶️ Start keyboard.)
+    context.user_data["awaiting"] = {"kind": "fix", "id": gid, "until": time.monotonic() + AWAIT_SECONDS}
     prompt = await update.effective_message.reply_text(
         t(lang, "fix_prompt", text=html.escape(vn["transcript"])),
         parse_mode=ParseMode.HTML,
-        reply_markup=ForceReply(selective=True, input_field_placeholder=t(lang, "fix_placeholder")),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="fx:cancel")]]),
     )
     if isinstance(getattr(prompt, "message_id", None), int):
         pending.set_voice_note_prompt(gid, prompt.message_id)
@@ -485,7 +613,7 @@ async def correct_transcript(update: Update, context: ContextTypes.DEFAULT_TYPE,
     await context.bot.send_chat_action(update.effective_chat.id, ChatAction.TYPING)
     try:
         result = await extractor.parse(
-            text=text, sent_at=datetime.fromisoformat(vn["sent_at"]), ctx=await mapping_context(lang)
+            text=text, sent_at=datetime.fromisoformat(vn["sent_at"]), ctx=await mapping_context(lang, vn["user_id"])
         )
     except Exception as e:
         log.exception("Parsing the corrected transcript failed")
@@ -548,7 +676,7 @@ async def handle_upload(uid: int, audio: bytes | None, mime: str, text: str | No
                 audio_mime=mime,
                 text=None if audio else text,
                 sent_at=datetime.now(timezone.utc),
-                ctx=await mapping_context(lang),
+                ctx=await mapping_context(lang, uid),
             )
         except Exception as e:
             note(outcome="parse_error", error=f"{type(e).__name__}: {e}"[:1000])
@@ -570,53 +698,87 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = ulang(update)
     if not can_use(query.from_user.id):
         note(outcome="denied")
-        await query.answer(t(lang, "not_allowed"), show_alert=True)
+        await answer(query, t(lang, "not_allowed"), show_alert=True)
         return
     action, pid, *rest = query.data.split(":")
     item = pending.get(pid)
     note(pending_ids=[pid])
     if item is None:
         note(outcome="already_handled")
-        await query.answer(t(lang, "already_handled"))
-        await query.edit_message_reply_markup(None)
+        await answer(query, t(lang, "already_handled"))
+        await edit_markup(query, None)
         return
     if item["user_id"] != query.from_user.id:  # e.g. someone else's expense in a group chat
         note(outcome="not_owner", owner_user_id=item["user_id"])
-        await query.answer(t(lang, "not_your_expense"), show_alert=True)
+        await answer(query, t(lang, "not_your_expense"), show_alert=True)
         return
 
-    if action in ("ed", "bk"):
+    if action in ("ed", "bk", "k"):
         pending.touch(pid)  # they're deciding: restart the auto-save clock
     if action == "ed":
         note(outcome="category_menu")
-        await query.answer()
-        await query.edit_message_text(
-            f"{fmt_item(item, lang)}\n{t(lang, 'pick_category')}",
+        await answer(query)
+        await edit_text(query,
+            f"{fmt_item(item, lang)}\n{t(lang, 'pick_category' if kind_of(item) == 'expense' else 'pick_kind')}",
             parse_mode=ParseMode.HTML,
-            reply_markup=category_keyboard(pid, lang),
+            reply_markup=change_keyboard(pid, item, lang),
         )
+    elif action == "k":
+        kind = rest[0] if rest and rest[0] in savings.KINDS else None
+        if kind is None:
+            await answer(query)
+            return
+        item = pending.update(pid, kind=kind, goal_id=item.get("goal_id") if kind in ("saving", "withdrawal") else None)
+        note(outcome="kind_changed", kind=kind)
+        if kind == "expense":  # which category, then save
+            await answer(query)
+            await edit_text(query, f"{fmt_item(item, lang)}\n{t(lang, 'pick_category')}",
+                            parse_mode=ParseMode.HTML, reply_markup=change_keyboard(pid, item, lang))
+        elif kind in ("saving", "withdrawal") and goals.of(item["user_id"]):  # which goal, then save
+            await answer(query)
+            await edit_text(query, f"{fmt_item(item, lang)}\n{kind_label(kind, lang)} · {t(lang, 'pick_goal')}",
+                            parse_mode=ParseMode.HTML, reply_markup=change_keyboard(pid, item, lang))
+        else:
+            await save(query, pid, item, 0, savings.ROW_CATEGORY[kind], lang)
+    elif action == "g":
+        gid = rest[0] if rest else "-"
+        goal = goals.get(gid, item["user_id"]) if gid != "-" else None
+        if gid != "-" and (goal is None or not goal.is_open):
+            note(outcome="goal_gone")
+            await answer(query, t(lang, "goal_gone"))
+            await edit_markup(query, change_keyboard(pid, item, lang))
+            return
+        item = pending.update(pid, goal_id=goal.goal_id if goal else None)
+        kind = kind_of(item)
+        await save(query, pid, item, 0, savings.ROW_CATEGORY.get(kind, "Savings"), lang)
     elif action == "bk":
         note(outcome="back")
-        await query.answer()
-        await query.edit_message_text(
+        await answer(query)
+        await edit_text(query, 
             proposal_text(item, lang), parse_mode=ParseMode.HTML, reply_markup=confirm_keyboard(pid, lang)
         )
     elif action == "no":
         note(outcome="discarded", category=item["category"], suggestion_source=item.get("suggestion_source"))
         pending.pop(pid)
-        await query.answer(t(lang, "discarded_toast"))
-        await query.edit_message_text(
+        await answer(query, t(lang, "discarded_toast"))
+        await edit_text(query, 
             f"<s>{fmt_item(item, lang)}</s>\n{t(lang, 'discarded_line')}", parse_mode=ParseMode.HTML
         )
     elif action == "ok":
-        await save(query, pid, item, item["category_id"], item["category"], lang)
+        kind = kind_of(item)
+        if kind == "expense":
+            await save(query, pid, item, item["category_id"], item["category"], lang)
+        else:
+            await save(query, pid, item, 0, savings.ROW_CATEGORY[kind], lang)
     elif action == "set":
         category = catalog.by_id(int(rest[0]))
         if category is None:  # removed from dim_categories since the buttons were drawn
             note(outcome="category_gone")
-            await query.answer(t(lang, "category_gone"))
-            await query.edit_message_reply_markup(category_keyboard(pid, lang))
+            await answer(query, t(lang, "category_gone"))
+            await edit_markup(query, category_keyboard(pid, lang))
             return
+        if kind_of(item) != "expense":  # a category button = it's spending after all
+            item = pending.update(pid, kind="expense", goal_id=None)
         await save(query, pid, item, category.id, category.name, lang)
 
 
@@ -627,15 +789,15 @@ async def save(query, pid: str, item: dict, category_id: int, category_name: str
     except Exception as e:
         log.exception("BigQuery insert failed")
         note(outcome="save_error", error=f"{type(e).__name__}: {e}"[:1000])
-        await query.answer(t(lang, "save_failed"), show_alert=True)
+        await answer(query, t(lang, "save_failed"), show_alert=True)
         return
     if done is None:  # auto-save got there first
         note(outcome="already_handled")
-        await query.answer(t(lang, "already_handled"))
+        await answer(query, t(lang, "already_handled"))
         return
     item, row, shown = done
-    await query.answer(t(lang, "saved_toast"))
-    await query.edit_message_text(f"{fmt_item(item, lang)}\n✅ <b>{html.escape(shown)}</b>", parse_mode=ParseMode.HTML)
+    await answer(query, t(lang, "saved_toast"))
+    await edit_text(query, f"{fmt_item(item, lang)}\n✅ <b>{html.escape(shown)}</b>", parse_mode=ParseMode.HTML)
 
 
 _save_lock = asyncio.Lock()
@@ -649,6 +811,11 @@ async def commit_expense(pid: str, category_id: int, category_name: str, lang: s
         item = pending.get(pid)
         if item is None:
             return None
+        kind = kind_of(item)
+        if kind != "expense":  # income / savings: no spending category
+            category_id, category_name = 0, savings.ROW_CATEGORY[kind]
+            if item.get("goal_id") and not goals.get(item["goal_id"], item["user_id"]):
+                item["goal_id"] = None  # the goal was closed or deleted meanwhile
         row = build_row(item, category_id, category_name, confirmed_by)
         await warehouse.insert(row)
         pending.pop(pid)
@@ -663,6 +830,8 @@ async def commit_expense(pid: str, category_id: int, category_name: str, lang: s
         category=category_name,
         suggestion_source=item.get("suggestion_source"),
         suggested_category=item["category"],
+        kind=kind,
+        goal_id=row.get("goal_id"),
     )
 
     # Teach the shared dictionary — only from real taps: an auto-saved guess was never checked by
@@ -671,7 +840,7 @@ async def commit_expense(pid: str, category_id: int, category_name: str, lang: s
     keys = catalog.keys_for(item.get("merchant"), item.get("description"))
     learned = None
     category = catalog.by_id(category_id)
-    if category and keys and confirmed_by == "user":
+    if category and keys and confirmed_by == "user" and kind == "expense":
         try:
             await catalog.learn(keys, category, row["was_corrected"])
             learned = {"keys": keys, "category_id": category_id, "corrected": row["was_corrected"]}
@@ -679,7 +848,7 @@ async def commit_expense(pid: str, category_id: int, category_name: str, lang: s
             log.exception("Dictionary update failed")
             note(dictionary_error=f"{type(e).__name__}: {e}"[:500])
 
-    shown = category_label(category_id, category_name, lang)
+    shown = shown_as(item, category_id, category_name, lang)
     summary = f"{fmt_money(item['amount'], item['currency'])} · {item_name(item)} → {shown}"
     pending.remember_saved(row["expense_id"], item["user_id"], chat_id, message_id, summary, learned)
     return item, row, shown
@@ -801,6 +970,7 @@ def main_menu(user_id: int, lang: str) -> InlineKeyboardMarkup:
 
     rows = [
         [b("m_today", "today"), b("m_week", "week"), b("m_month", "month")],
+        [b("m_savings", "savings")],
         [b("m_undo", "undo"), b("m_categories", "categories")],
     ]
     if household.home_of(user_id):
@@ -808,7 +978,7 @@ def main_menu(user_id: int, lang: str) -> InlineKeyboardMarkup:
     else:
         rows.append([b("m_household", "household")])
     if is_admin(user_id):
-        rows.append([b("m_users", "users")] + ([b("m_dashboard", "dashboard")] if config.DASHBOARD else []))
+        rows.append([b("m_users", "users")])
     if shortcut_available():
         rows.append([b("m_shortcut", "shortcut")])
     view = "m_view_detailed" if pending.get_report_mode(user_id) == "detailed" else "m_view_summary"
@@ -829,14 +999,14 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "today": cmd_today, "week": cmd_week, "month": cmd_month, "undo": cmd_undo,
         "categories": cmd_categories, "reload": cmd_reload, "family": cmd_family,
         "household": cmd_household, "language": cmd_language, "users": cmd_users, "help": cmd_help,
-        "delete": cmd_delete, "shortcut": cmd_shortcut, "dashboard": cmd_dashboard,
-        "restore": cmd_restore,
+        "delete": cmd_delete, "shortcut": cmd_shortcut,
+        "restore": cmd_restore, "savings": cmd_savings,
     }
     if action == "view":
         await toggle_report_view(update)
         return
     cmd = commands.get(action)
-    await query.answer()
+    await answer(query)
     if cmd is None:
         note(outcome="unknown_menu_item")
         return
@@ -850,15 +1020,15 @@ async def toggle_report_view(update: Update):
     query = update.callback_query
     if not can_use(query.from_user.id):
         note(outcome="denied")
-        await query.answer(t(ulang(update), "not_allowed"), show_alert=True)
+        await answer(query, t(ulang(update), "not_allowed"), show_alert=True)
         return
     lang = ulang(update)
     mode = "summary" if pending.get_report_mode(query.from_user.id) == "detailed" else "detailed"
     pending.set_report_mode(query.from_user.id, mode)
     note(outcome="report_view_set", report_mode=mode)
-    await query.answer(t(lang, "view_now_detailed" if mode == "detailed" else "view_now_summary"), show_alert=True)
+    await answer(query, t(lang, "view_now_detailed" if mode == "detailed" else "view_now_summary"), show_alert=True)
     try:
-        await query.edit_message_reply_markup(main_menu(query.from_user.id, lang))
+        await edit_markup(query, main_menu(query.from_user.id, lang))
     except Exception:  # an old menu that can't be edited any more
         log.info("Could not relabel the menu")
 
@@ -921,12 +1091,12 @@ async def handle_shortcut_button(update: Update, context: ContextTypes.DEFAULT_T
     lang = ulang(update)
     if not can_use(query.from_user.id) or not shortcut_available():
         note(outcome="denied")
-        await query.answer(t(lang, "not_allowed"), show_alert=True)
+        await answer(query, t(lang, "not_allowed"), show_alert=True)
         return
     key = pending.new_upload_key(query.from_user.id)
     note(outcome="shortcut_key_rotated")
-    await query.answer(t(lang, "sc_new_key_done"))
-    await query.edit_message_text(
+    await answer(query, t(lang, "sc_new_key_done"))
+    await edit_text(query, 
         shortcut_text(lang, key), parse_mode=ParseMode.HTML, reply_markup=shortcut_keyboard(lang),
         disable_web_page_preview=True,
     )
@@ -971,21 +1141,21 @@ async def handle_delete_button(update: Update, context: ContextTypes.DEFAULT_TYP
     lang = ulang(update)
     if not can_use(query.from_user.id):
         note(outcome="denied")
-        await query.answer(t(lang, "not_allowed"), show_alert=True)
+        await answer(query, t(lang, "not_allowed"), show_alert=True)
         return
     if query.data == "del:restore":
         await restore_my_data(update, lang)
         return
-    await query.answer()
+    await answer(query)
     if query.data == "del:go":
         context.user_data["delete_confirm_until"] = time.monotonic() + DELETE_WINDOW_SECONDS
         note(outcome="delete_armed")
-        await query.edit_message_reply_markup(None)
+        await edit_markup(query, None)
         await update.effective_message.reply_text(t(lang, "del_type_to_confirm"), parse_mode=ParseMode.HTML)
     else:
         context.user_data.pop("delete_confirm_until", None)
         note(outcome="delete_cancelled")
-        await query.edit_message_text(t(lang, "del_cancelled"))
+        await edit_text(query, t(lang, "del_cancelled"))
 
 
 async def delete_confirmation(update: Update, context: ContextTypes.DEFAULT_TYPE, lang: str) -> bool:
@@ -1025,6 +1195,10 @@ async def delete_my_data(update: Update, context: ContextTypes.DEFAULT_TYPE, lan
             note(outcome="delete_error", error=f"{type(e).__name__}: {e}"[:1000])
             await update.effective_message.reply_text(t(lang, "del_failed"))
             return
+        try:  # their savings goals go with their data (and come back with it)
+            await asyncio.to_thread(goals.soft_delete_user, uid, now.isoformat())
+        except Exception:
+            log.exception("Couldn't hide the savings goals of %s", uid)
         snapshot = {"language": pending.get_language(uid), "report_mode": pending.get_report_mode(uid)}
         pending.add_deletion(uid, now.isoformat(), (now + timedelta(days=max(days, 0))).isoformat(),
                              (now + LOG_PURGE_GRACE).isoformat(), archive, snapshot)
@@ -1066,14 +1240,15 @@ async def restore_my_data(update: Update, lang: str):
         if d is None:
             note(outcome="nothing_to_restore")
             if query:
-                await query.answer(t(lang, "restore_nothing"), show_alert=True)
+                await answer(query, t(lang, "restore_nothing"), show_alert=True)
             else:
                 await reply(t(lang, "restore_nothing"))
             return
         if query:
-            await query.answer()
+            await answer(query)
         try:
             n = await asyncio.to_thread(warehouse.restore_user_data, uid, d["archive_table"])
+            await asyncio.to_thread(goals.restore_user, uid, d["deleted_at"])
         except Exception as e:
             log.exception("Restoring user data failed")
             note(outcome="restore_error", error=f"{type(e).__name__}: {e}"[:1000])
@@ -1090,7 +1265,7 @@ async def restore_my_data(update: Update, lang: str):
     note(outcome="restored", expenses_restored=n)
     if query:
         try:
-            await query.edit_message_reply_markup(None)
+            await edit_markup(query, None)
         except Exception:
             pass
     await reply(t(lang, "restored", n=n))
@@ -1114,6 +1289,7 @@ async def erase_due_deletions():
                 removed = await asyncio.to_thread(
                     warehouse.hard_delete_user_data, uid, d["archive_table"], d["log_cutoff"]
                 )
+                await asyncio.to_thread(goals.hard_delete_user, uid)
             except Exception as e:  # e.g. rows still in the streaming buffer (only with retention 0)
                 log.info("Erasing data of %s not possible yet (%s); will retry", uid, str(e)[:120])
                 continue
@@ -1167,6 +1343,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text += t(lang, "help_auto", minutes=f"{config.AUTO_SAVE_MINUTES:g}")
     text += t(lang, "help_fix")
     text += t(lang, "help_delete_line")
+    text += t(lang, "help_savings")
     text += t(lang, "help_household")
     markup = None
     if shortcut_available():
@@ -1210,19 +1387,19 @@ async def handle_language_button(update: Update, context: ContextTypes.DEFAULT_T
     query = update.callback_query
     if not can_use(query.from_user.id):
         note(outcome="denied")
-        await query.answer(t(ulang(update), "not_allowed"), show_alert=True)
+        await answer(query, t(ulang(update), "not_allowed"), show_alert=True)
         return
     code = query.data.split(":", 1)[1]
     if code not in i18n.LANGUAGES:
         note(outcome="unknown_language")
-        await query.answer()
+        await answer(query)
         return
     pending.set_language(query.from_user.id, code)
     note(outcome="language_set", language=code)
     await sync_chat_commands(context.bot, update.effective_chat.id, code, force=True)
     asyncio.create_task(users.observe(query.from_user, role_of(query.from_user.id), code, force=True))
-    await query.answer(t(code, "lang_set"))
-    await query.edit_message_text(t(code, "lang_set"))
+    await answer(query, t(code, "lang_set"))
+    await edit_text(query, t(code, "lang_set"))
     # Fresh menus in the new language, including the ▶️ Start button label
     # (older menus keep their old labels but still work).
     await send_start(update.effective_message, query.from_user.id, code)
@@ -1274,11 +1451,14 @@ async def _report(update: Update, context: ContextTypes.DEFAULT_TYPE, period: st
     else:
         start, title = today.replace(day=1), fmt_month(today, lang)
     mode = pending.get_report_mode(update.effective_user.id)
+    flow = None
     try:
         if mode == "detailed":
-            items = await warehouse.expenses(update.effective_user.id, start, today)
+            items, flow = await asyncio.gather(warehouse.expenses(update.effective_user.id, start, today),
+                                               warehouse.money_flow(update.effective_user.id, start, today))
         else:
-            rows = await warehouse.totals(update.effective_user.id, start, today)
+            rows, flow = await asyncio.gather(warehouse.totals(update.effective_user.id, start, today),
+                                              warehouse.money_flow(update.effective_user.id, start, today))
     except Exception as e:
         log.exception("Report query failed")
         note(outcome="report_error", error=f"{type(e).__name__}: {e}"[:1000])
@@ -1293,6 +1473,7 @@ async def _report(update: Update, context: ContextTypes.DEFAULT_TYPE, period: st
         uid = update.effective_user.id
         index: list[tuple[int, str, str]] = []
         text = detailed_report(title, items, lang, multi_day=start != today, index=index)
+        text += money_lines(savings.overview(flow or []), lang)
         rid = secrets.token_hex(5)
         sent = await send_long(update.effective_message, text, reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton(t(lang, "btn_delete_line"), callback_data=f"rl:{rid}")]]
@@ -1304,7 +1485,8 @@ async def _report(update: Update, context: ContextTypes.DEFAULT_TYPE, period: st
         note(report_id=rid)
         return
     note(outcome="report", report_mode=mode, period=period, period_start=str(start), period_end=str(today), rows=len(rows))
-    if not rows:
+    extra = money_lines(savings.overview(flow or []), lang)
+    if not rows and not extra:
         await update.effective_message.reply_text(t(lang, "nothing_yet", title=title))
         return
     by_currency: dict[str, Decimal] = {}
@@ -1313,9 +1495,29 @@ async def _report(update: Update, context: ContextTypes.DEFAULT_TYPE, period: st
         by_currency[currency] = by_currency.get(currency, Decimal(0)) + total
         lines.append(f"{html.escape(category_label(category_id, category, lang))}: {fmt_money(total, currency)}")
     totals = " + ".join(fmt_money(v, k) for k, v in by_currency.items())
-    await update.effective_message.reply_text(
-        f"<b>{title}</b> — {totals}\n\n" + "\n".join(lines), parse_mode=ParseMode.HTML
-    )
+    head = f"<b>{title}</b> — {totals}" if totals else f"<b>{title}</b>"
+    body = "\n\n" + "\n".join(lines) if lines else ""
+    await update.effective_message.reply_text(head + body + extra, parse_mode=ParseMode.HTML)
+
+
+def money_text(d: dict[str, Decimal]) -> str:
+    return " + ".join(fmt_money(v, k) for k, v in d.items() if v) or "0"
+
+
+def money_lines(o: savings.Overview, lang: str) -> str:
+    """The income / put aside / left block under a report. Empty for someone who only logs spending."""
+    if not (o.income or o.put_aside or o.taken_out):
+        return ""
+    lines = [""]
+    if o.income:
+        lines.append(f"💵 {t(lang, 'r_income')}: {money_text(o.income)}")
+    if o.put_aside:
+        lines.append(f"💰 {t(lang, 'r_put_aside')}: {money_text(o.put_aside)}")
+    if o.taken_out:
+        lines.append(f"🏦 {t(lang, 'r_taken_out')}: {money_text(o.taken_out)}")
+    if o.income:
+        lines.append(f"🟰 <b>{t(lang, 'r_left')}: {money_text(o.left)}</b>")
+    return "\n" + "\n".join(lines)
 
 
 def sum_by_currency(pairs) -> str:
@@ -1331,21 +1533,30 @@ def detailed_report(title: str, items: list[dict], lang: str, multi_day: bool,
     🗑 Delete a line asks for); grouped under day headings when the period spans several days.
     `index` collects (number, expense_id, plain-text line) for each line."""
     n = 0
-    lines = [f"<b>{title}</b> — {sum_by_currency((i['amount'], i['currency']) for i in items)}"]
+
+    def spent(rows):  # headings add up spending only; income and savings lines carry their own icon
+        total = sum_by_currency((i["amount"], i["currency"]) for i in rows if (i.get("kind") or "expense") == "expense")
+        return f" — {total}" if total else ""
+
+    lines = [f"<b>{title}</b>{spent(items)}"]
     by_day: dict[date, list[dict]] = {}
     for i in items:
         by_day.setdefault(i["expense_date"], []).append(i)
     for day, day_items in by_day.items():
         lines.append("")
         if multi_day:
-            lines.append(f"<b>{fmt_day(day, lang)}</b> — {sum_by_currency((i['amount'], i['currency']) for i in day_items)}")
+            lines.append(f"<b>{fmt_day(day, lang)}</b>{spent(day_items)}")
         for i in day_items:
             name = (i.get("item_label") if lang != i18n.DEFAULT_LANGUAGE else None) or i.get("description") or "—"
             merchant = f" ({html.escape(i['merchant'])})" if i.get("merchant") else ""
-            cat = category_label(i.get("category_id"), i.get("category") or "", lang)
+            kind = i.get("kind") or "expense"
+            if kind == "expense":
+                cat, icon = category_label(i.get("category_id"), i.get("category") or "", lang), ""
+            else:
+                cat, icon = kind_label(kind, lang) + goal_suffix(i.get("goal_id"), lang), savings.ICONS[kind] + " "
             n += 1
             lines.append(
-                f"<b>{n}.</b> {fmt_money(i['amount'], i['currency'])} · {html.escape(name)}{merchant} — <i>{html.escape(cat)}</i>"
+                f"<b>{n}.</b> {icon}{fmt_money(i['amount'], i['currency'])} · {html.escape(name)}{merchant} — <i>{html.escape(cat)}</i>"
             )
             if index is not None and i.get("expense_id"):
                 plain_merchant = f" ({i['merchant']})" if i.get("merchant") else ""
@@ -1370,7 +1581,8 @@ async def send_long(msg, text: str, limit: int = 4000, reply_markup=None) -> lis
 
 # ---- 🗑 Delete a line (detailed reports) ---------------------------------- #
 
-MAX_LINES_PER_DELETE = 10  # keeps the confirm button's data under Telegram's 64 bytes
+MAX_LINES_PER_DELETE = 10
+AWAIT_SECONDS = 600  # after 🗑 Delete a line / ✏️ Fix text, the next message is the answer for this long  # keeps the confirm button's data under Telegram's 64 bytes
 
 
 @logged("button")
@@ -1383,29 +1595,33 @@ async def handle_report_button(update: Update, context: ContextTypes.DEFAULT_TYP
     uid = query.from_user.id
     parts = query.data.split(":")
     if query.data == "rx:no":
+        context.user_data.pop("awaiting", None)
         note(outcome="delete_lines_cancelled")
-        await query.answer()
-        await query.edit_message_text(t(lang, "dl_cancelled"))
+        await answer(query)
+        await edit_text(query, t(lang, "dl_cancelled"))
         return
     rid = parts[1]
     rows = pending.report_rows(rid, uid)
     note(report_id=rid)
     if not rows:
         note(outcome="report_gone")
-        await query.answer(t(lang, "dl_gone"), show_alert=True)
+        await answer(query, t(lang, "dl_gone"), show_alert=True)
         return
     if parts[0] == "rl":
-        await query.answer()
+        await answer(query)
+        # Wait for their next message (not ForceReply: it would replace the pinned ▶️ Start keyboard).
+        context.user_data["awaiting"] = {"kind": "lines", "id": rid, "until": time.monotonic() + AWAIT_SECONDS}
         prompt = await update.effective_message.reply_text(
             t(lang, "dl_prompt", n=max(rows)),
-            reply_markup=ForceReply(selective=True, input_field_placeholder=t(lang, "dl_placeholder")),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="rx:no")]]),
         )
         if isinstance(getattr(prompt, "message_id", None), int):
             pending.add_report_message(rid, uid, update.effective_chat.id, prompt.message_id)
         note(outcome="delete_lines_prompt")
         return
     # rx:<rid>:<numbers> - confirmed
-    await query.answer()
+    context.user_data.pop("awaiting", None)
+    await answer(query)
     numbers = [int(x) for x in parts[2].split(",") if x.isdigit()] if len(parts) > 2 else []
     deleted, gone = [], []
     for n in numbers:
@@ -1434,7 +1650,7 @@ async def handle_report_button(update: Update, context: ContextTypes.DEFAULT_TYP
     text = t(lang, "dl_done", lines="\n".join(f"{r['idx']}. {r['summary']}" for r in deleted)) if deleted else ""
     if gone:
         text += ("\n\n" if text else "") + t(lang, "dl_already", lines=", ".join(map(str, gone)))
-    await query.edit_message_text(text or t(lang, "dl_cancelled"))
+    await edit_text(query, text or t(lang, "dl_cancelled"))
 
 
 async def forget_save(context: ContextTypes.DEFAULT_TYPE, expense_id: str, lang: str):
@@ -1459,7 +1675,7 @@ async def forget_save(context: ContextTypes.DEFAULT_TYPE, expense_id: str, lang:
         pass  # too old to edit
 
 
-async def ask_delete_lines(update: Update, rid: str, text: str, lang: str):
+async def ask_delete_lines(update: Update, rid: str, text: str, lang: str) -> bool:
     """A reply to a detailed report (or to its "which line?" prompt) with line numbers: confirm first."""
     uid, msg = update.effective_user.id, update.effective_message
     rows = pending.report_rows(rid, uid)
@@ -1467,17 +1683,17 @@ async def ask_delete_lines(update: Update, rid: str, text: str, lang: str):
     if not rows:
         note(outcome="report_gone")
         await msg.reply_text(t(lang, "dl_gone"))
-        return
+        return True
     wanted = list(dict.fromkeys(int(x) for x in re.findall(r"\d+", text or "")))
     if not wanted or any(n not in rows for n in wanted) or len(wanted) > MAX_LINES_PER_DELETE:
         note(outcome="delete_lines_bad_input")
         await msg.reply_text(t(lang, "dl_bad", n=max(rows), max=MAX_LINES_PER_DELETE))
-        return
+        return False
     live = [n for n in wanted if not rows[n]["deleted"]]
     if not live:
         note(outcome="already_deleted")
         await msg.reply_text(t(lang, "dl_already", lines=", ".join(map(str, wanted))))
-        return
+        return True
     note(outcome="delete_lines_confirm", lines=live)
     await msg.reply_text(
         t(lang, "dl_confirm", lines="\n".join(f"{n}. {rows[n]['summary']}" for n in live)),
@@ -1486,6 +1702,7 @@ async def ask_delete_lines(update: Update, rid: str, text: str, lang: str):
             InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="rx:no"),
         ]]),
     )
+    return True
 
 
 @logged("command")
@@ -1539,6 +1756,209 @@ async def cmd_undo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass  # original message may be too old to edit
     await update.effective_message.reply_text(t(lang, "removed_summary", s=summary))
+
+
+# --------------------------------------------------------------------------- #
+# 💰 Savings: income, money put aside, goals                                  #
+# --------------------------------------------------------------------------- #
+
+
+def savings_keyboard(user_id: int, lang: str) -> InlineKeyboardMarkup:
+    rows = [[InlineKeyboardButton(t(lang, "btn_new_goal"), callback_data="sv:new")]]
+    if goals.of(user_id):
+        rows[0].append(InlineKeyboardButton(t(lang, "btn_close_goal"), callback_data="sv:cl"))
+    return InlineKeyboardMarkup(rows)
+
+
+def savings_text(user_id: int, o: savings.Overview, lang: str, today: date) -> str:
+    lines = [f"💰 <b>{t(lang, 'sv_title')}</b>"]
+    balance = {c: v for c, v in o.balance.items() if v}
+    lines.append(f"{t(lang, 'sv_total')}: <b>{money_text(balance)}</b>")
+    lines += ["", f"<b>{fmt_month(today, lang)}</b>"]
+    lines.append(f"💵 {t(lang, 'r_income')}: {money_text(o.income)}")
+    lines.append(f"🧾 {t(lang, 'r_spent')}: {money_text(o.spent)}")
+    lines.append(f"💰 {t(lang, 'r_put_aside')}: {money_text(o.put_aside)}")
+    if o.taken_out:
+        lines.append(f"🏦 {t(lang, 'r_taken_out')}: {money_text(o.taken_out)}")
+    if o.income:
+        lines.append(f"🟰 {t(lang, 'r_left')}: <b>{money_text(o.left)}</b>")
+        rates = [(c, o.savings_rate(c)) for c in o.income]
+        shown = [f"{r}%" + (f" ({c})" if len(rates) > 1 else "") for c, r in rates if r is not None]
+        if shown:
+            lines.append(f"📈 {t(lang, 'sv_rate')}: {', '.join(shown)}")
+    mine = goals.of(user_id)
+    lines += ["", f"🎯 <b>{t(lang, 'sv_goals')}</b>"]
+    if not mine:
+        lines.append(t(lang, "sv_no_goals"))
+    for g in mine:
+        p = savings.progress(g, o.by_goal.get(g.goal_id, {}), today)
+        head = f"<b>{html.escape(g.name)}</b> — {fmt_money(p.saved, g.currency)}"
+        if g.target:
+            head += f" / {fmt_money(g.target, g.currency)}"
+        lines.append(head)
+        if p.others:
+            lines.append("   + " + money_text(p.others))
+        if g.target:
+            detail = f"{savings.bar(p.percent)} {p.percent}%"
+            if p.reached:
+                detail += " · " + t(lang, "sv_reached")
+            elif p.overdue:
+                detail += " · " + t(lang, "sv_overdue", date=fmt_date(g.deadline, lang))
+            elif p.per_month is not None:
+                detail += " · " + t(lang, "sv_per_month", amount=fmt_money(p.per_month, g.currency),
+                                    date=fmt_date(g.deadline, lang))
+            lines.append("   " + detail)
+        elif g.deadline:
+            lines.append("   " + t(lang, "sv_by", date=fmt_date(g.deadline, lang)))
+    lines += ["", t(lang, "sv_how")]
+    return "\n".join(lines)
+
+
+@logged("command")
+async def cmd_savings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await allowed(update, context):
+        return
+    await show_savings(update, ulang(update))
+
+
+async def show_savings(update: Update, lang: str):
+    uid = update.effective_user.id
+    today = datetime.now(config.TIMEZONE).date()
+    try:
+        flow = await warehouse.money_flow(uid, today.replace(day=1), today)
+    except Exception as e:
+        log.exception("Savings query failed")
+        note(outcome="report_error", error=f"{type(e).__name__}: {e}"[:1000])
+        await update.effective_message.reply_text(t(lang, "report_failed"))
+        return
+    note(outcome="savings_shown", goals=len(goals.of(uid)))
+    await update.effective_message.reply_text(
+        savings_text(uid, savings.overview(flow), lang, today), parse_mode=ParseMode.HTML,
+        reply_markup=savings_keyboard(uid, lang),
+    )
+
+
+@logged("button")
+async def handle_savings_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """sv:new -> ask for a goal · sv:x -> cancel · sv:cl -> which goal to close · sv:c:<id> -> confirm ·
+    sv:cy:<id> -> close it · sv:show -> the savings screen."""
+    query = update.callback_query
+    if not await allowed(update, context):
+        return
+    lang = ulang(update)
+    uid = query.from_user.id
+    parts = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "new":
+        if len(goals.of(uid)) >= savings.MAX_OPEN_GOALS:
+            note(outcome="too_many_goals")
+            await answer(query, t(lang, "goal_too_many", n=savings.MAX_OPEN_GOALS), show_alert=True)
+            return
+        await answer(query)
+        context.user_data["awaiting"] = {"kind": "goal", "id": "", "until": time.monotonic() + AWAIT_SECONDS}
+        note(outcome="goal_prompt")
+        await update.effective_message.reply_text(
+            t(lang, "goal_prompt", currency=config.DEFAULT_CURRENCY), parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="sv:x")]]),
+        )
+    elif action == "x":
+        context.user_data.pop("awaiting", None)
+        note(outcome="goal_cancelled")
+        await answer(query)
+        await edit_text(query, t(lang, "goal_cancelled"))
+    elif action == "show":
+        await answer(query)
+        await show_savings(update, lang)
+    elif action == "cl":
+        mine = goals.of(uid)
+        await answer(query)
+        if not mine:
+            await update.effective_message.reply_text(t(lang, "sv_no_goals"))
+            return
+        note(outcome="close_goal_menu")
+        await update.effective_message.reply_text(
+            t(lang, "goal_which_close"),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton(f"🎯 {g.name}", callback_data=f"sv:c:{g.goal_id}")] for g in mine]
+                + [[InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="sv:x")]]
+            ),
+        )
+    elif action in ("c", "cy"):
+        g = goals.get(parts[2] if len(parts) > 2 else None, uid)
+        if g is None or not g.is_open:
+            note(outcome="goal_gone")
+            await answer(query, t(lang, "goal_gone"), show_alert=True)
+            return
+        await answer(query)
+        if action == "c":
+            await edit_text(query, t(lang, "goal_close_confirm", name=html.escape(g.name)), parse_mode=ParseMode.HTML,
+                            reply_markup=InlineKeyboardMarkup([[
+                                InlineKeyboardButton(t(lang, "btn_close_goal_yes"), callback_data=f"sv:cy:{g.goal_id}"),
+                                InlineKeyboardButton(t(lang, "btn_cancel"), callback_data="sv:x"),
+                            ]]))
+            return
+        try:
+            async with goals.lock:
+                await goals.close(g.goal_id)
+        except Exception as e:
+            log.exception("Closing a goal failed")
+            note(outcome="goal_error", error=f"{type(e).__name__}: {e}"[:1000])
+            await update.effective_message.reply_text(t(lang, "goal_failed"))
+            return
+        note(outcome="goal_closed", goal_id=g.goal_id)
+        await edit_text(query, t(lang, "goal_closed", name=html.escape(g.name)), parse_mode=ParseMode.HTML)
+    else:
+        await answer(query)
+
+
+async def create_goal(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, lang: str):
+    """The answer to 🎯 New goal: "Trip to Japan 2 000 000 by June" -> a goal."""
+    uid, msg = update.effective_user.id, update.effective_message
+    try:
+        parsed = await extractor.parse_goal(text, sent_at=msg.date)
+    except Exception as e:
+        log.exception("Goal parsing failed")
+        note(outcome="parse_error", error=f"{type(e).__name__}: {e}"[:1000])
+        await msg.reply_text(t(lang, "parse_failed"))
+        return
+    if parsed is None:
+        note(outcome="goal_not_understood")
+        context.user_data["awaiting"] = {"kind": "goal", "id": "", "until": time.monotonic() + AWAIT_SECONDS}
+        await msg.reply_text(t(lang, "goal_not_understood"), parse_mode=ParseMode.HTML)
+        return
+    async with goals.lock:
+        if goals.by_name(uid, parsed.name):
+            note(outcome="goal_exists")
+            await msg.reply_text(t(lang, "goal_exists", name=html.escape(parsed.name)), parse_mode=ParseMode.HTML)
+            return
+        if len(goals.of(uid)) >= savings.MAX_OPEN_GOALS:
+            note(outcome="too_many_goals")
+            await msg.reply_text(t(lang, "goal_too_many", n=savings.MAX_OPEN_GOALS))
+            return
+        try:
+            g = await goals.create(uid, parsed.name, parsed.target, parsed.currency, parsed.deadline)
+        except Exception as e:
+            log.exception("Creating a goal failed")
+            note(outcome="goal_error", error=f"{type(e).__name__}: {e}"[:1000])
+            await msg.reply_text(t(lang, "goal_failed"))
+            return
+    note(outcome="goal_created", goal_id=g.goal_id, target=str(g.target) if g.target else None,
+         currency=g.currency, deadline=str(g.deadline) if g.deadline else None)
+    details = []
+    if g.target:
+        details.append(t(lang, "goal_target", amount=fmt_money(g.target, g.currency)))
+    if g.deadline:
+        details.append(t(lang, "sv_by", date=fmt_date(g.deadline, lang)))
+        if g.target:
+            months = savings.months_until(datetime.now(config.TIMEZONE).date(), g.deadline)
+            per = (g.target / months).quantize(Decimal("1"), rounding="ROUND_CEILING")
+            details.append(t(lang, "goal_needs", amount=fmt_money(per, g.currency)))
+    await msg.reply_text(
+        t(lang, "goal_created", name=html.escape(g.name), details=" · ".join(details),
+          example=html.escape(g.name)),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton(t(lang, "m_savings"), callback_data="sv:show")]]),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -1605,12 +2025,12 @@ async def cmd_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # --------------------------------------------------------------------------- #
-# Owner: 📊 monitoring dashboard (dashboard.py)                                #
+# 🖥 App status page (dashboard.py): local to the Mac, not part of Telegram     #
 # --------------------------------------------------------------------------- #
 
 
 def local_metrics(days: int) -> dict:
-    """What only the running bot knows, for the dashboard."""
+    """What only the running bot knows, for the 🖥 App status page."""
     now = datetime.now(timezone.utc)
     today = datetime.now(config.TIMEZONE).date().isoformat()
     db = pending.db
@@ -1627,8 +2047,23 @@ def local_metrics(days: int) -> dict:
     for uid, kind, n in db.execute("SELECT user_id, kind, n FROM usage WHERE day = ?", (today,)).fetchall():
         per_user.setdefault(str(uid), {})[kind] = n
     fallback = interaction_log.fallback
+    since = (now - timedelta(days=days)).isoformat()
+    downtime, outages = 0.0, pending.outages_since(since)
+    for started, ended in outages:
+        a = max(datetime.fromisoformat(started), now - timedelta(days=days))
+        b = datetime.fromisoformat(ended) if ended else now
+        downtime += max(0.0, (b - a).total_seconds())
     return {
         "started_at": STARTED_AT.isoformat(),
+        "deleted_in_period": db.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM deletions WHERE deleted_at >= ?", (since,)).fetchone()[0],
+        "restored_in_period": db.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM deletions WHERE deleted_at >= ? AND status = 'restored'",
+            (since,)).fetchone()[0],
+        "outages": len(outages),
+        "downtime_seconds": round(downtime),
+        "down_now": _network["down_since"] is not None,
+        "last_outage": ({"started_at": outages[-1][0], "ended_at": outages[-1][1]} if outages else None),
         "last_update_at": _last_update["at"].isoformat() if _last_update["at"] else None,
         "now": now.isoformat(),
         "pending": db.execute("SELECT COUNT(*) FROM pending").fetchone()[0],
@@ -1657,6 +2092,8 @@ def local_metrics(days: int) -> dict:
             "upload_endpoint": bool(config.INGEST_SECRET),
             "public_url": bool(config.INGEST_PUBLIC_URL),
             "timezone": str(config.TIMEZONE),
+            "price_input": config.LLM_PRICE_INPUT,
+            "price_output": config.LLM_PRICE_OUTPUT,
             "currency": config.DEFAULT_CURRENCY,
             "categories": len(catalog.categories),
         },
@@ -1669,54 +2106,7 @@ def local_metrics(days: int) -> dict:
     }
 
 
-dash_auth = dashboard.Auth(pending.db)
 metrics = dashboard.Metrics(warehouse.client, warehouse.ds, local_metrics)
-
-
-def dashboard_base() -> str:
-    return f"http://127.0.0.1:{config.DASHBOARD_PORT}"  # this Mac only, never the Tailscale address
-
-
-@logged("command")
-async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Owner only: a one-time sign-in link to the web dashboard."""
-    if not await allowed(update, context):
-        return
-    lang = ulang(update)
-    msg = update.effective_message
-    if not is_admin(update.effective_user.id):
-        note(outcome="not_owner")
-        await msg.reply_text(t(lang, "owner_only"))
-        return
-    if not config.DASHBOARD:
-        note(outcome="dashboard_off")
-        await msg.reply_text(t(lang, "dash_off"))
-        return
-    link = f"{dashboard_base()}/dashboard/login?t={dash_auth.login_token()}"
-    note(outcome="dashboard_link")
-    text = t(lang, "dash_link", link=html.escape(link, quote=False), minutes=dashboard.LOGIN_TTL // 60)
-    await msg.reply_text(
-        text, parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,  # a preview would fetch the link and use it up
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton(t(lang, "btn_dash_revoke"), callback_data="dash:revoke")]]
-        ),
-    )
-
-
-@logged("button")
-async def handle_dashboard_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """🚪 Sign out everywhere: a new signing key ends every dashboard session and unused link."""
-    query = update.callback_query
-    lang = ulang(update)
-    if not is_admin(query.from_user.id):
-        note(outcome="not_owner")
-        await query.answer(t(lang, "owner_only"), show_alert=True)
-        return
-    dash_auth.rotate()
-    note(outcome="dashboard_signed_out")
-    await query.answer(t(lang, "dash_revoked"), show_alert=True)
-    await query.edit_message_text(t(lang, "dash_revoked"))
 
 
 # --------------------------------------------------------------------------- #
@@ -1870,16 +2260,16 @@ async def handle_household_button(update: Update, context: ContextTypes.DEFAULT_
     bot_username = context.bot.username
 
     async def show(toast: str | None = None):
-        await query.answer(toast)
+        await answer(query, toast)
         text, kb = household_view(uid, lang, bot_username)
-        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
+        await edit_text(query, text, parse_mode=ParseMode.HTML, reply_markup=kb, disable_web_page_preview=True)
 
     creator_only = {"link", "rm", "end", "endok"}
     async with household.lock:  # one change at a time, checked against the current state
         home = household.home_of(uid)
         if action in creator_only and not household.is_creator(uid):
             note(outcome="not_creator")
-            await query.answer(t(lang, "hh_creator_only"), show_alert=True)
+            await answer(query, t(lang, "hh_creator_only"), show_alert=True)
             return
 
         if action == "create":
@@ -1912,8 +2302,8 @@ async def handle_household_button(update: Update, context: ContextTypes.DEFAULT_
 
         elif action == "end":
             note(outcome="household_end_prompt")
-            await query.answer()
-            await query.edit_message_text(
+            await answer(query)
+            await edit_text(query, 
                 t(lang, "hh_end_confirm"),
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton(t(lang, "btn_yes_end"), callback_data="hh:endok"),
@@ -1928,16 +2318,16 @@ async def handle_household_button(update: Update, context: ContextTypes.DEFAULT_
             note(outcome="household_ended", household_id=home.household_id, members=len(former))
             for x in others:
                 await tell(context, x, "hh_ended_by_creator", name=home.name)
-            await query.answer(t(lang, "hh_ended_toast"))
-            await query.edit_message_text(t(lang, "hh_ended"), reply_markup=create_keyboard(lang))
+            await answer(query, t(lang, "hh_ended_toast"))
+            await edit_text(query, t(lang, "hh_ended"), reply_markup=create_keyboard(lang))
 
         elif action == "leave":
             if home is None or household.is_creator(uid):
                 await show()
                 return
             note(outcome="household_leave_prompt")
-            await query.answer()
-            await query.edit_message_text(
+            await answer(query)
+            await edit_text(query, 
                 t(lang, "hh_leave_confirm", name=home.name),
                 reply_markup=InlineKeyboardMarkup(
                     [[InlineKeyboardButton(t(lang, "btn_yes_leave"), callback_data="hh:leaveok"),
@@ -1953,15 +2343,15 @@ async def handle_household_button(update: Update, context: ContextTypes.DEFAULT_
             await users.set_role([uid], "none")
             note(outcome="household_left", household_id=home.household_id)
             await tell(context, home.created_by, "hh_member_left", who=me, name=home.name)
-            await query.answer()
-            await query.edit_message_text(t(lang, "hh_left", name=home.name), reply_markup=create_keyboard(lang))
+            await answer(query)
+            await edit_text(query, t(lang, "hh_left", name=home.name), reply_markup=create_keyboard(lang))
 
         elif action == "join":
             target = household.by_code(arg or "")
             if target is None:
                 note(outcome="invite_invalid")
-                await query.answer()
-                await query.edit_message_text(t(lang, "hh_invite_invalid"))
+                await answer(query)
+                await edit_text(query, t(lang, "hh_invite_invalid"))
             elif home is not None:
                 note(outcome="in_other_household" if home.household_id != target.household_id else "already_member")
                 await show()
@@ -1970,15 +2360,15 @@ async def handle_household_button(update: Update, context: ContextTypes.DEFAULT_
                 await users.set_role([uid], "member")
                 note(outcome="household_joined", household_id=target.household_id)
                 await tell(context, target.created_by, "hh_member_joined", who=me, name=target.name)
-                await query.answer(t(lang, "hh_joined_toast"))
-                await query.edit_message_text(
+                await answer(query, t(lang, "hh_joined_toast"))
+                await edit_text(query, 
                     t(lang, "hh_joined", name=html.escape(target.name, quote=False)), parse_mode=ParseMode.HTML
                 )
 
         elif action == "nojoin":
             note(outcome="join_declined")
-            await query.answer()
-            await query.edit_message_text(t(lang, "hh_join_cancelled"))
+            await answer(query)
+            await edit_text(query, t(lang, "hh_join_cancelled"))
 
         else:  # cancel / back
             note(outcome="back")
@@ -2042,6 +2432,24 @@ async def cmd_family(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --------------------------------------------------------------------------- #
 
 
+@logged("membership")
+async def handle_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Telegram tells the bot when someone blocks it (status "kicked") or unblocks it again.
+    Logged so 🖥 App status can count people who left."""
+    change = update.my_chat_member
+    if change is None or change.chat.type != "private":
+        note(outcome="ignored")
+        return
+    old, new = change.old_chat_member.status, change.new_chat_member.status
+    note(old_status=old, new_status=new)
+    if new == "kicked":
+        note(outcome="bot_blocked")
+    elif old == "kicked":
+        note(outcome="bot_unblocked")
+    else:
+        note(outcome="membership_changed")
+
+
 @logged("edit")
 async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Edited messages are not re-processed: that would create a duplicate proposal."""
@@ -2078,6 +2486,7 @@ def network_back():
     since = _network["down_since"]
     if since is not None:
         _network["down_since"] = None
+        pending.outage_ended(datetime.now(timezone.utc).isoformat())
         secs = int((datetime.now(timezone.utc) - since).total_seconds())
         log.info("Telegram reachable again after %s", f"{secs // 60} min {secs % 60} s" if secs >= 60 else f"{secs} s")
 
@@ -2092,6 +2501,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
         if _network["down_since"] is None:
             _network["down_since"] = datetime.now(timezone.utc)
             _network["warned_at"] = now
+            pending.outage_started(_network["down_since"].isoformat())
             log.warning("Can't reach Telegram (%s). Retrying automatically; messages wait on Telegram's side.",
                         f"{type(err).__name__}: {err}".strip(": "))
         elif now - _network["warned_at"] >= NETWORK_WARN_EVERY:
@@ -2131,7 +2541,7 @@ async def _post_init(app: Application):
             log.exception("Upload endpoint could not start (port %s busy?)", config.INGEST_PORT)
     if config.DASHBOARD:  # separate server, 127.0.0.1 only: the dashboard never goes through the tunnel
         try:
-            app.bot_data["dashboard_runner"] = await dashboard.start(dash_auth, metrics)
+            app.bot_data["dashboard_runner"] = await dashboard.start(metrics)
         except OSError:
             log.exception("Dashboard could not start (port %s busy?)", config.DASHBOARD_PORT)
     app.bot_data["purge_task"] = asyncio.create_task(log_purge_loop())
@@ -2184,9 +2594,14 @@ def main():
     if config.OWNER_USER_ID is None:
         log.warning("OWNER_USER_ID is empty — the bot will only reply with the sender's ID.")
     warehouse.ensure_shared()
+    changed = warehouse.migrate_fact_tables()  # kind / goal_id on tables made before savings existed
+    if changed:
+        log.info("Added the savings columns to %d expense tables", changed)
     interaction_log.ensure_table()
+    pending.outage_ended(datetime.now(timezone.utc).isoformat())  # an outage still open from before a restart
     catalog.load()
     household.setup(config.OWNER_USER_ID)
+    goals.setup()
     users.ensure_table(config.OWNER_USER_ID, [u for u in household.members if not is_admin(u)])
     import transcribe
 
@@ -2200,6 +2615,7 @@ def main():
     )
     new = ~filters.UpdateType.EDITED
     app.add_handler(TypeHandler(Update, track_user), group=-1)  # before everything else, for every update
+    app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.UpdateType.EDITED_MESSAGE, handle_edit))
     app.add_handler(CommandHandler("start", cmd_start, filters=new))
     app.add_handler(CommandHandler("help", cmd_help, filters=new))
@@ -2207,6 +2623,7 @@ def main():
     app.add_handler(CommandHandler("today", cmd_today, filters=new))
     app.add_handler(CommandHandler("week", cmd_week, filters=new))
     app.add_handler(CommandHandler("month", cmd_month, filters=new))
+    app.add_handler(CommandHandler("savings", cmd_savings, filters=new))
     app.add_handler(CommandHandler("undo", cmd_undo, filters=new))
     app.add_handler(CommandHandler("reload", cmd_reload, filters=new))
     app.add_handler(CommandHandler("language", cmd_language, filters=new))
@@ -2217,7 +2634,6 @@ def main():
     app.add_handler(CommandHandler("family", cmd_family, filters=new))
     app.add_handler(CommandHandler("shortcut", cmd_shortcut, filters=new))
     app.add_handler(CommandHandler("block", cmd_block, filters=new))
-    app.add_handler(CommandHandler("dashboard", cmd_dashboard, filters=new))
     app.add_handler(CommandHandler("unblock", cmd_unblock, filters=new))
     app.add_handler(MessageHandler(new & filters.Text(MENU_BUTTON_TEXTS), cmd_menu))
     app.add_handler(MessageHandler(new & (filters.VOICE | filters.AUDIO), handle_voice))
@@ -2228,9 +2644,9 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_language_button, pattern=r"^lang:"))
     app.add_handler(CallbackQueryHandler(handle_delete_button, pattern=r"^del:"))
     app.add_handler(CallbackQueryHandler(handle_shortcut_button, pattern=r"^sc:"))
-    app.add_handler(CallbackQueryHandler(handle_dashboard_button, pattern=r"^dash:"))
     app.add_handler(CallbackQueryHandler(handle_fix_button, pattern=r"^fx:"))
     app.add_handler(CallbackQueryHandler(handle_report_button, pattern=r"^r[lx]:"))
+    app.add_handler(CallbackQueryHandler(handle_savings_button, pattern=r"^sv:"))
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_handler(MessageHandler(new & filters.COMMAND, cmd_unknown))
     app.add_handler(MessageHandler(new & ~filters.StatusUpdate.ALL, handle_other))

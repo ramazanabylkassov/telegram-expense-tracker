@@ -62,6 +62,12 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
+# AI prices in USD per million tokens, for the cost shown on the 🖥 App status page.
+# Defaults are Claude Haiku 4.5's list prices; set them for another model (0 = show tokens only).
+_haiku = LLM_PROVIDER == "claude" and "haiku" in CLAUDE_MODEL
+LLM_PRICE_INPUT = float(os.getenv("LLM_PRICE_INPUT", "1" if _haiku else "0"))
+LLM_PRICE_OUTPUT = float(os.getenv("LLM_PRICE_OUTPUT", "5" if _haiku else "0"))
+
 # --- Behaviour ----------------------------------------------------------------
 TIMEZONE = ZoneInfo(os.getenv("TIMEZONE", "Asia/Almaty"))
 DEFAULT_CURRENCY = os.getenv("DEFAULT_CURRENCY", "KZT")

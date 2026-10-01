@@ -19,7 +19,7 @@ Category: Shopping? (🤖 guess)            ← model's guess, nothing known yet
 
 **No answer for 10 minutes?** The bot saves the expense with its suggested category and edits the message to `✅ Eating out · auto-saved`. Tapping ✏️ restarts the 10 minutes, so you won't lose it mid-pick. Auto-saved rows get `confirmed_by = 'auto'` in BigQuery, and they don't teach the dictionary (only your own taps do). `/undo` works on them as usual. Change the delay with `AUTO_SAVE_MINUTES` in `.env` (`0` turns it off).
 
-**Voice misheard?** Every 🎙 transcript, from Telegram voice notes and Action Button uploads alike, has a **✏️ Fix text** button. Tapping it opens a reply with the transcript ready to copy; send the corrected text back. Replying directly to the 🎙 message works the same way. The bot then:
+**Voice misheard?** Every 🎙 transcript, from Telegram voice notes and Action Button uploads alike, has a **✏️ Fix text** button. Tapping it shows the transcript ready to copy; send the corrected text as your next message (within 10 minutes; Cancel is under the prompt). Replying directly to the 🎙 message works the same way. The bot then:
 - withdraws the proposals from the misheard version that are still unanswered (marked "✖️ replaced by the corrected text");
 - updates the 🎙 message to show old → new;
 - reads the corrected text again, dated by when the recording was sent (so "yesterday" stays right).
@@ -28,16 +28,45 @@ Proposals already saved stay saved, and the bot says so, so you can ↩️ Undo 
 
 **Report view** — the 📊 / 🧾 button under Today · Week · Month switches *your* reports between totals by category and a detailed list of every expense (grouped by day), and stays that way until you tap it again.
 
-**Delete any line:** in the 🧾 detailed view every expense is numbered (1, 2, 3… across the whole report). **🗑 Delete a line** under the report asks for the number. Reply with it (several at once: `3, 5`), or just reply to the report with the numbers. The bot shows those lines and asks to confirm. Deleting works like ↩️ Undo for any line:
+**Delete any line:** in the 🧾 detailed view every expense is numbered (1, 2, 3… across the whole report). **🗑 Delete a line** under the report asks for the number. Send it as your next message (several at once: `3, 5`), or reply to the report with the numbers at any time. A message without numbers counts as an ordinary message. The bot shows those lines and asks to confirm. Deleting works like ↩️ Undo for any line:
 - the row is removed from BigQuery;
 - what that save taught the dictionary is rolled back (when the save's history is still on the Mac);
 - the original proposal message is struck out.
 
-No AI call is involved, so it doesn't count towards the daily limits. Numbers always refer to the report they came from, so a stale number can't hit the wrong expense, and a line deleted in one report shows as deleted in the others. Reports can be used this way for 7 days (stored in `pending.sqlite3`: `report_rows`, `report_messages`).
+No AI call is involved, so it doesn't count towards the daily limits. Numbers always refer to the report they came from, so a stale number can't hit the wrong expense, and a line deleted in one report shows as deleted in the others. The prompts never replace the pinned ▶️ Start keyboard; they use an inline Cancel button and wait 10 minutes for the answer. Reports can be used this way for 7 days (stored in `pending.sqlite3`: `report_rows`, `report_messages`).
 
-`/start` shows a button menu (📅 Today · 📆 Week · 🗓 Month · ↩️ Undo last · 🏷 Categories · 🔄 Reload · 🏠 Household, plus 👨‍👩‍👧 Family totals when you're in a household and 👥 Users for the owner). Tapping a button runs the command, and the menu stays in place.
+## 💰 Income and savings
 
-Commands: `/today`, `/week`, `/month`, `/undo` (removes the last saved expense and what it taught the dictionary), `/categories`, `/reload`, `/household`, `/family`. The owner also has `/users`, `/block <id>` and `/unblock <id>`.
+Log them the same way as spending, by text, voice or the Action Button. One message can mix them all: "зарплата 600 000, отложил 100 000 на Японию, кофе 1500".
+
+| Kind | Examples | Shown as |
+|---|---|---|
+| Expense | "coffee 1500" | its category, as before |
+| 💵 Income | "salary 600 000", "аванс 250к", "cashback 5000" | 💵 Income |
+| 💰 Put aside | "put aside 50 000", "на депозит 200к", "отложил 30 000 на машину" | 💰 Put aside (→ 🎯 goal) |
+| 🏦 From savings | "took 20 000 from savings", "снял 50 000 с депозита" | 🏦 From savings (→ 🎯 goal) |
+
+Refunds, transfers between your own everyday accounts and loans are not recorded. The AI decides the kind; ✏️ on a proposal switches it:
+- on an expense, ✏️ shows the categories plus 💵 / 💰 / 🏦;
+- on anything else, it shows the other kinds and, for savings, your goals ("No goal" is fine).
+
+A pick saves at once, like picking a category. Income and savings never teach the category dictionary, and auto-save, ↩️ Undo, 🗑 Delete a line and Delete my data work on them as on expenses.
+
+**🎯 Goals.** 💰 Savings → 🎯 New goal, then send something like "Trip to Japan 2 000 000 by June" (the AI reads name, target, currency and date; target and date are optional). After that, "отложил 50 000 на Японию" counts towards that goal: the bot gives the model your goal names. ✅ Close a goal (with a confirmation) takes it off the list. Money already put aside stays in your total. You can have up to 8 open goals.
+
+**💰 Savings** (menu or `/savings`) shows:
+- the total saved (all time: put aside − taken out);
+- this month: income, spent, put aside, taken out, and **left** = income − spent − (put aside − taken out);
+- the saving rate (net put aside ÷ income);
+- each goal: saved / target, a progress bar, %, and how much per month is still needed to make the date.
+
+Currencies are never converted. Each one is shown separately, and "left" is only shown in currencies you earned in.
+
+**Reports** keep their spending totals exactly as before. Under them come 💵 Income, 💰 Put aside, 🏦 Taken from savings and 🟰 Left, but only when the period has any. In the 🧾 detailed view income and savings lines carry their icon and aren't counted in the spending totals. Family totals stay spending only, so income and savings remain private.
+
+`/start` shows a button menu (📅 Today · 📆 Week · 🗓 Month · 💰 Savings · ↩️ Undo last · 🏷 Categories · 🔄 Reload · 🏠 Household, plus 👨‍👩‍👧 Family totals when you're in a household and 👥 Users for the owner). Tapping a button runs the command, and the menu stays in place.
+
+Commands: `/today`, `/week`, `/month`, `/savings`, `/undo` (removes the last saved expense and what it taught the dictionary), `/categories`, `/reload`, `/household`, `/family`. The owner also has `/users`, `/block <id>` and `/unblock <id>`.
 
 ## Languages: English and Russian
 
@@ -111,22 +140,31 @@ SHORTCUT_URL=https://www.icloud.com/shortcuts/…
 ```
 Now a member's **📲 Action Button** message reads: open the link → Add Shortcut → paste your key → Settings → Action Button → pick *Log expense*. Without `SHORTCUT_URL`, the bot shows the manual build steps with the URL filled in instead.
 
-## 📊 Monitoring dashboard
+## 🖥 App status (on your Mac only)
 
-A web page with the bot's key numbers, for you only. In the bot: **▶️ Start → 📊 Dashboard** (or `/dashboard`). You get a sign-in link that works **once, within 10 minutes**. Opening it keeps that browser signed in for 30 days. **🚪 Sign out everywhere** under the link ends every session and unused link.
+A local web page showing how the **bot itself** is doing: users, traffic, AI tokens and cost, and problems. It never shows anyone's expenses: no amounts, no categories, and it doesn't read the per-user expense tables. It isn't part of the Telegram bot at all: no button, no command, nothing in the help.
 
-**Mac only.** The dashboard has its own tiny server at `http://127.0.0.1:8788/dashboard` that listens only on the Mac. The Tailscale tunnel forwards a different port (8787, the Action Button upload), so the dashboard can't be reached from your phone or the internet, even with the tunnel on. As a second guard, it refuses requests whose address isn't the Mac's own (this stops a website in your browser from reaching it) and anything that came through a proxy. Change the port with `DASHBOARD_PORT` (it must differ from `INGEST_PORT`); turn the dashboard off with `DASHBOARD=off`.
+**Open it:** while the bot runs, go to **http://127.0.0.1:8788** in any browser on the Mac (or run `open http://127.0.0.1:8788`). The bot's log prints the address at startup. Bookmark it; there's no sign-in.
 
-**What's on it** (for the last 24 hours, 7, 30 or 90 days, each compared with the period before):
-- **Overview:** active and new users, messages to the AI, expenses saved, how often the suggested category was kept, dictionary hit rate, errors, and response time (median and p95).
-- **Activity:** messages per day (or hour) split into text, voice and Action Button; active users; errors; and what happened to proposals (saved as suggested, category changed, auto-saved, discarded).
-- **Quality:** per category, how often people changed the suggestion, how often it was auto-saved, and how often it came from the dictionary. Response time by input type. Dictionary size and today's usage against the limits.
-- **Users:** everyone active in the period with their role, activity, errors, today's usage against the limits, and their ID for `/block`.
-- **Recent errors** with the error text, and **bot health**: uptime, last message received, proposals waiting, log queue and fallback file, open data deletions, households, blocked people, and the active settings.
+**Why that's safe:** the page has its own tiny server that listens only on the Mac (`127.0.0.1:8788`). The Tailscale tunnel forwards a different port (8787, the Action Button upload), so the page can't be reached from your phone or the internet. It also refuses requests that:
+- don't come directly from the Mac;
+- use an address other than the Mac's own (this stops a website from reaching it through DNS tricks);
+- came through a proxy or tunnel;
+- were made by another website open in your browser.
 
-Every chart has a "Show as table" view. The page refreshes every 5 minutes and follows your light or dark setting. Each section is loaded separately, so one failing query shows an error in that card and the rest still loads. Queries are cached for 5 minutes and only read the log, `dim_users` and the dictionary, never the per-user expense tables. BigQuery bills at least 10 MB per table a query touches, so reading every user's table would grow with each new user. A refresh costs about 90 MB, so even a page left open all day stays inside the free tier.
+Browsers also don't let other sites read its data. Change the port with `DASHBOARD_PORT` (it must differ from `INGEST_PORT`); turn the page off with `DASHBOARD=off`.
 
-**Security:** besides being Mac-only, the page and its data need the sign-in cookie (HttpOnly, SameSite=Strict). The link message has no preview, so Telegram doesn't use up the link. The signing key is kept in `pending.sqlite3`.
+**What's on it** (last 24 hours, 7, 30 or 90 days, each compared with the period before):
+- **Users:** total, active, new, and **left**: people who blocked the bot in Telegram (the bot now logs Telegram's notice) plus people who used 🗑 Delete my data. Charts of active and new users.
+- **Traffic:** all requests, messages that went to the AI (text, voice, Action Button), minutes of voice Whisper transcribed, and daily-limit hits.
+- **AI usage:** tokens sent and received, and the **cost** for the period and this month, with a projection for the month. Also tokens per message, and response time and tokens by input type. Token counts come from each AI response and are stored in `log_interactions` (`llm_input_tokens`, `llm_output_tokens`). Prices are set with `LLM_PRICE_INPUT` / `LLM_PRICE_OUTPUT` in USD per million tokens (defaults: Claude Haiku 4.5, $1 / $5).
+- **Issues:** errors and error rate, **Telegram outages** (times this Mac couldn't reach Telegram and how long; stored in `pending.sqlite3`, table `outages`), response time, how often the AI's category was kept, and the 20 latest errors with their text.
+- **People:** everyone active with their status (you, household, on their own, blocked by you, blocked the bot), actions, AI messages, tokens, errors, today's usage against the limits, and their ID for `/block`.
+- **Bot health & settings:** uptime, last message received, Telegram connection, queues, restorable deleted accounts, households, blocks, AI model and prices, dictionary size, limits.
+
+Every chart has a "Show as table" view. **Auto-refresh:** every 5 minutes by default, or choose every minute, 15 minutes, hour or off (remembered in that browser). A countdown shows the next update, and it only counts while the tab is visible. BigQuery numbers are cached for 5 minutes on the bot's side, so a faster setting only updates the bot's own numbers and never raises costs. **↻ Refresh** fetches fresh BigQuery numbers, at most once a minute. The page follows your light or dark setting.
+
+**Checked at startup:** when the bot starts, BigQuery validates every query on the page with a free dry run. The log says `App status queries checked by BigQuery: all OK`, or names the query it rejected. Each section loads separately, so one failing query shows an error in its card and the rest still loads. The queries only read `log_interactions`, `dim_users` and the dictionary, about 90 MB per refresh however many users you have, so even a page left open all day stays inside BigQuery's free tier. Token and audio counts start from this version; older rows have none.
 
 ## Delete my data (soft delete, erased after 30 days)
 
@@ -186,14 +224,15 @@ State is stored in BigQuery (`dim_households`, `dim_household_members`) and cach
 
 | Table | Scope | What's in it |
 |---|---|---|
-| `fct_expenses_<telegram_user_id>` | one per user | One row per confirmed expense: amount, currency, date, category, merchant, the raw input, what was suggested and whether it was corrected. Partitioned by `expense_date`. |
+| `fct_expenses_<telegram_user_id>` | one per user | One row per confirmed entry: amount, currency, date, category, merchant, the raw input, what was suggested and whether it was corrected. `kind` is `expense` (NULL in older rows), `income`, `saving` or `withdrawal`; `goal_id` links savings to a goal. Non-expense rows have `category_id = 0`. Anything that adds up spending filters `IFNULL(kind, 'expense') = 'expense'`. Partitioned by `expense_date`. Older tables get the new columns at startup. |
+| `dim_savings_goals` | shared | One row per goal: `goal_id`, `user_id`, `name`, `target_amount`, `currency`, `deadline`, `closed_at`, and `deleted_at` (set by Delete my data, cleared by Restore, erased with the rest). |
 | `dim_categories` | shared | The category list: `category_id`, `name`, `description` (guidance for the model), `sort_order`, `is_active`. |
 | `dim_spend_variants` | shared | The dictionary: every merchant (`starbucks`, `yandex go`) and item (`coffee`, `taxi`) ever confirmed, with its category and `confirmations` / `corrections` counts. |
 | `dim_users` | shared | One row per Telegram user who ever wrote to the bot: name, @username, Telegram app language, language chosen in the bot, role (`owner` = you, `household_owner`, `member`, `none`, `blocked`), first and last seen. Updated when something changes (at most hourly for `last_seen_at`); filled from the interaction log on first start. |
 | `log_interactions` | shared | One row per update the bot receives: every text, voice note, command and button tap, including blocked and unsupported ones. Records who sent it, what they sent, the transcript, the outcome (`proposed`, `saved`, `saved_corrected`, `discarded`, `denied`, `error`, …), the linked `expense_id`, the AI provider and model, latency, and the error with its traceback. Partitioned by day. |
 | `dim_households` | shared | One row per household: `household_id`, `name`, `created_by`, the current `invite_code`, `is_active`. |
 | `dim_household_members` | shared | One row per person who has been in a household: `user_id`, `display_name`, `household_id`, `role` (owner = created it / member), `is_active`. |
-| `v_expenses_all` | view | Everyone's fact tables together (`fct_expenses_*`); family totals join it to the members of one household. |
+| `v_expenses_all` | view | Everyone's fact tables together (`fct_expenses_*`), all kinds; family totals add up only `kind = expense` for the members of one household. |
 | `v_spend_variants` | view | The dictionary with category names. |
 
 **Interaction log:** every handler is wrapped, so each update produces exactly one row, even when the handler crashes. Rows are buffered and streamed to BigQuery every 5 seconds in the background, so logging never slows down a reply. If BigQuery is unreachable, rows are retried for about 5 minutes, then appended to `interaction_log_failed.jsonl` so nothing is lost. `pending_ids` links a proposal message to the button taps on it. `schema.sql` has funnel, error and trace queries.
@@ -254,7 +293,8 @@ On first start the bot creates and seeds everything: 13 categories and about 70 
 | `catalog.py` | Shared categories + dictionary: cache, lookup, learning |
 | `users.py` | `dim_users`: who's who, kept current from every interaction |
 | `i18n.py` | All user-facing text in English and Russian, date formats, Telegram command menus |
-| `dashboard.py`, `dashboard.html` | 📊 Monitoring dashboard: sign-in, metrics queries, the page |
+| `dashboard.py`, `dashboard.html` | 🖥 App status page (local, http://127.0.0.1:8788): metrics queries and the page |
+| `savings.py` | Income / savings kinds, `dim_savings_goals`, totals, goal progress |
 | `household.py` | Households: create, invite links, join/leave/remove/end, `/family` totals |
 | `interactions.py` | Interaction log: per-update record, background streaming to BigQuery |
 | `extractor.py` | Prompt, JSON schema and validation for Gemini / Claude / OpenAI |

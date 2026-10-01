@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Expense bot monitor</title>
+<title>Expense bot app status</title>
 <style>
 :root {
   color-scheme: light;
@@ -96,6 +96,8 @@ button:focus-visible, .btn:focus-visible, [tabindex]:focus-visible, summary:focu
 .seg label:hover { background: var(--wash); }
 .seg input:checked + label { background: var(--text-primary); color: var(--surface); font-weight: 600; }
 .filters .note { color: var(--text-muted); font-size: 13px; }
+.refresh-group { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+#next { min-width: 5.5em; font-variant-numeric: tabular-nums; }
 
 section { margin-bottom: 28px; }
 section > h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); font-weight: 600; margin: 0 0 10px; }
@@ -169,7 +171,6 @@ td .muted { color: var(--text-muted); }
 .section-error { color: var(--critical-text); font-size: 13px; }
 .empty { color: var(--text-muted); font-size: 13.5px; padding: 12px 0; }
 .loading main { opacity: 0.55; transition: opacity 120ms; }
-.signedout { max-width: 30rem; margin: 20vh auto; text-align: center; color: var(--text-secondary); }
 
 @media (max-width: 900px) {
   .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -186,14 +187,13 @@ td .muted { color: var(--text-muted); }
 <div class="wrap">
   <header class="top">
     <div>
-      <h1>📊 Expense bot</h1>
+      <h1>🖥 Expense bot · app status</h1>
       <div class="sub" id="updated">Loading…</div>
     </div>
     <div class="spacer"></div>
     <div class="actions">
       <span class="pill" id="status" role="status"><span class="dot"></span><span id="status-text">Checking…</span></span>
       <button id="refresh" type="button" title="Refresh now">↻ Refresh</button>
-      <a class="btn" href="/dashboard/logout">Sign out</a>
     </div>
   </header>
 
@@ -205,72 +205,88 @@ td .muted { color: var(--text-muted); }
       <input type="radio" name="days" id="d90" value="90"><label for="d90">90 days</label>
     </div>
     <span class="note" id="period-note"></span>
+    <span class="spacer"></span>
+    <span class="refresh-group">
+    <label class="note" for="every">Auto-refresh</label>
+    <select id="every" class="btn" aria-label="Auto-refresh interval">
+      <option value="60">every minute</option>
+      <option value="300">every 5 minutes</option>
+      <option value="900">every 15 minutes</option>
+      <option value="3600">every hour</option>
+      <option value="0">off</option>
+    </select>
+    <span class="note" id="next" aria-live="off"></span>
+    </span>
   </div>
 
   <main id="main">
     <section>
-      <h2>Overview</h2>
-      <div class="tiles" id="tiles"></div>
-    </section>
-
-    <section>
-      <h2>Activity</h2>
-      <div class="grid2">
-        <div class="card">
-          <h3>Messages to the AI</h3>
-          <p class="desc">Texts, voice notes and Action Button uploads the bot read</p>
-          <div id="c-messages"></div>
-        </div>
+      <h2>Users</h2>
+      <div class="tiles" id="k-users"></div>
+      <div class="grid2" style="margin-top:12px">
         <div class="card">
           <h3>Active users</h3>
           <p class="desc">People who did anything in the bot</p>
-          <div id="c-users"></div>
+          <div id="c-active"></div>
         </div>
-        <div class="card outcomes">
-          <h3>What happens to proposals</h3>
-          <p class="desc">Every expense the bot proposed and was answered in this period</p>
-          <div id="c-outcomes"></div>
+        <div class="card">
+          <h3>New users</h3>
+          <p class="desc">First message to the bot</p>
+          <div id="c-new"></div>
         </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Traffic</h2>
+      <div class="tiles" id="k-traffic"></div>
+      <div class="card" style="margin-top:12px">
+        <h3>Messages to the AI</h3>
+        <p class="desc">Texts, voice notes and Action Button uploads the bot read (button taps and reports don't use the AI)</p>
+        <div id="c-messages"></div>
+      </div>
+    </section>
+
+    <section>
+      <h2 id="ai-title">AI usage</h2>
+      <div class="tiles" id="k-ai"></div>
+      <div class="grid2" style="margin-top:12px">
+        <div class="card">
+          <h3>Tokens</h3>
+          <p class="desc">Sent to the AI (prompt) and received back (answer)</p>
+          <div id="c-tokens"></div>
+        </div>
+        <div class="card">
+          <h3>Per input type</h3>
+          <p class="desc">Response time from receiving a message to showing the proposal, and tokens per message</p>
+          <div id="t-latency"></div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Issues</h2>
+      <div class="tiles" id="k-issues"></div>
+      <div class="grid2" style="margin-top:12px">
         <div class="card">
           <h3>⚠ Errors</h3>
           <p class="desc">Failed AI calls, saves and reports</p>
           <div id="c-errors"></div>
         </div>
-      </div>
-    </section>
-
-    <section>
-      <h2>Quality</h2>
-      <div class="grid2">
-        <div class="card span2">
-          <h3>Categories</h3>
-          <p class="desc">Saved expenses by category. <b>Changed</b> = the person picked another category than suggested; <b>from dictionary</b> = the suggestion came from confirmed spends, not the AI.</p>
-          <div id="t-categories"></div>
-        </div>
         <div class="card">
-          <h3>Response time</h3>
-          <p class="desc">From receiving a message to showing the proposal</p>
-          <div id="t-latency"></div>
-        </div>
-        <div class="card">
-          <h3>Dictionary &amp; limits</h3>
-          <p class="desc">The shared spend dictionary and today's usage</p>
-          <dl class="health one" id="t-dict"></dl>
+          <h3>Recent errors</h3>
+          <p class="desc">Latest 20 in this period</p>
+          <div id="t-errors"></div>
         </div>
       </div>
     </section>
 
     <section>
-      <h2>Users</h2>
+      <h2>People</h2>
       <div class="card">
         <p class="desc" id="users-desc">Everyone active in this period, most active first</p>
         <div id="t-users"></div>
       </div>
-    </section>
-
-    <section>
-      <h2>Recent errors</h2>
-      <div class="card"><div id="t-errors"></div></div>
     </section>
 
     <section>
@@ -500,7 +516,6 @@ function sectionError(host, sec) {
   if (sec && sec.error) { host.replaceChildren(el("div", { class: "section-error" }, "⚠ Couldn't load: " + sec.error)); return true; }
   return false;
 }
-
 function deltaNode(cur, prev, upIsGood) {
   if (prev == null) return el("span", {}, "");
   if (!prev && !cur) return el("span", {}, `no change vs ${periodName(DAYS)}`);
@@ -511,129 +526,121 @@ function deltaNode(cur, prev, upIsGood) {
   return el("span", {}, el("span", { class: `${up ? "up" : "down"}-${good ? "good" : "bad"}` },
     `${up ? "▲" : "▼"} ${Math.abs(ch * 100).toFixed(Math.abs(ch) < 0.1 ? 1 : 0)}%`), ` vs ${periodName(DAYS)}`);
 }
-
-function tile(label, value, unit, delta, title) {
+function tile(label, value, unit, sub, title) {
   return el("div", { class: "card tile", title: title || null },
     el("div", { class: "label" }, label),
     el("div", { class: "value" }, value, unit ? el("small", {}, unit) : null),
-    el("div", { class: "delta" }, delta));
+    el("div", { class: "delta" }, sub));
 }
-
-function renderTiles(d) {
-  const host = $("#tiles");
-  if (sectionError(host, d.kpis)) return;
-  const c = d.kpis.current, p = d.kpis.previous;
-  const tapped = (x) => x.saved_as_suggested + x.saved_corrected;
-  const saved = (x) => tapped(x) + x.auto_saved;
-  const acc = (x) => tapped(x) ? x.saved_as_suggested / tapped(x) : null;
-  const errRate = (x) => x.ai_messages ? x.errors / x.ai_messages : 0;
-  const cats = Array.isArray(d.categories) ? d.categories : [];
-  const catSaved = cats.reduce((a, r) => a + r.saved, 0), fromDict = cats.reduce((a, r) => a + r.from_dictionary, 0);
-  const accNow = acc(c), accPrev = acc(p);
-  const pp = (a, b) => (a == null || b == null) ? el("span", {}, "") :
-    el("span", {}, el("span", { class: a >= b ? "up-good" : "down-bad" }, `${a >= b ? "▲" : "▼"} ${Math.abs((a - b) * 100).toFixed(1)} pts`), ` vs ${periodName(DAYS)}`);
-  host.replaceChildren(
-    tile("Active users", compact(c.active_users), null, deltaNode(c.active_users, p.active_users, true)),
-    tile("New users", compact(c.new_users), null, el("span", {}, deltaNode(c.new_users, p.new_users, true), ` · ${nf.format(c.total_users)} all time`)),
-    tile("Messages to the AI", compact(c.ai_messages), null, deltaNode(c.ai_messages, p.ai_messages, true)),
-    tile("Expenses saved", compact(saved(c)), null, deltaNode(saved(c), saved(p), true)),
-    tile("Suggestions accepted", accNow == null ? "–" : (accNow * 100).toFixed(0), accNow == null ? null : "%",
-      accNow == null ? el("span", {}, "no taps yet") : pp(accNow, accPrev), "Saved with the suggested category, out of all expenses saved by a tap"),
-    tile("Dictionary hits", catSaved ? (100 * fromDict / catSaved).toFixed(0) : "–", catSaved ? "%" : null,
-      el("span", {}, `${nf.format(fromDict)} of ${nf.format(catSaved)} saved expenses`), "Suggestion came from confirmed spends instead of the AI"),
-    tile("Errors", compact(c.errors), null,
-      el("span", {}, c.ai_messages ? `${pct(c.errors, c.ai_messages, 1)} of messages · ` : "", deltaNode(c.errors, p.errors, false))),
-    tile("Response time (p95)", secs(c.p95_ms), null, el("span", {}, `median ${secs(c.p50_ms)}`)),
-  );
-}
-
-function renderCharts(d) {
-  const s1 = d.series;
-  for (const id of ["#c-messages", "#c-users", "#c-errors"]) if (sectionError($(id), s1)) return renderOutcomes(d);
-  const pts = s1.points, unit = s1.unit;
-  columnChart($("#c-messages"), pts, unit, [
-    { key: "text", label: "Text", color: "--series-1" },
-    { key: "voice", label: "Voice", color: "--series-2" },
-    { key: "upload", label: "Action Button", color: "--series-3" },
-  ]);
-  lineChart($("#c-users"), pts, unit, { key: "active_users", label: "active users", color: "--series-1" });
-  columnChart($("#c-errors"), pts, unit, [{ key: "errors", label: "errors", color: "--critical" }]);
-  renderOutcomes(d);
-}
-
-function renderOutcomes(d) {
-  const host = $("#c-outcomes");
-  if (sectionError(host, d.kpis)) return;
-  const c = d.kpis.current;
-  const parts = [
-    { label: "Saved as suggested", v: c.saved_as_suggested, color: "--series-1" },
-    { label: "Category changed", v: c.saved_corrected, color: "--series-2" },
-    { label: "Auto-saved", v: c.auto_saved, color: "--series-3" },
-    { label: "Discarded", v: c.discarded, color: "--series-4" },
-  ];
-  const total = parts.reduce((a, p) => a + p.v, 0);
-  if (!total) { host.replaceChildren(el("div", { class: "empty" }, "No answered proposals in this period.")); return; }
-  const box = el("div", { class: "chart" });
-  const bar = el("div", { class: "bar", role: "img", "aria-label": parts.map((p) => `${p.label} ${p.v}`).join(", ") });
-  const tip = tooltipFor(box);
-  for (const p of parts.filter((x) => x.v > 0)) {
-    const seg = el("div", { tabindex: 0, style: `flex:${p.v} 1 0;background:var(${p.color})` });
-    const show = () => {
-      const r = seg.getBoundingClientRect(), b = box.getBoundingClientRect();
-      tip.show(r.left - b.left + r.width / 2 - 20, r.top - b.top, p.label,
-        [{ color: `var(${p.color})`, value: nf.format(p.v), label: pct(p.v, total, 1) }]);
-    };
-    seg.addEventListener("pointerenter", show); seg.addEventListener("focus", show);
-    seg.addEventListener("pointerleave", () => tip.hide()); seg.addEventListener("blur", () => tip.hide());
-    bar.append(seg);
-  }
-  box.append(bar);
-  host.replaceChildren(box, el("div", { class: "legend" }, parts.map((p) =>
-    el("span", {}, el("i", { style: `background:var(${p.color})` }), `${p.label} `, el("b", {}, pct(p.v, total)), ` (${nf.format(p.v)})`))));
-}
-
 function table(headers, rows, numericFrom = 1, minWidth = 0) {
   return el("div", { class: "tablewrap" }, el("table", { style: minWidth ? `min-width:${minWidth}px` : null },
     el("thead", {}, el("tr", {}, headers.map((h, i) => el("th", { class: i >= numericFrom ? "num" : null }, h)))),
     el("tbody", {}, rows.map((r) => el("tr", {}, r.map((c, i) => el("td", { class: i >= numericFrom ? "num" : null }, c)))))));
 }
+const usd = (v) => v == null ? "–" : v < 0.01 && v > 0 ? "<$0.01" : "$" + v.toFixed(v < 10 ? 2 : 0);
+function cost(tin, tout, cfg) {
+  if (!cfg.price_input && !cfg.price_output) return null;
+  return (tin / 1e6) * cfg.price_input + (tout / 1e6) * cfg.price_output;
+}
+function minutes(sec) { return sec < 60 ? `${Math.round(sec)} s` : sec < 3600 ? `${Math.round(sec / 60)} min` : `${(sec / 3600).toFixed(1)} h`; }
 
-function renderCategories(d) {
-  const host = $("#t-categories");
-  if (sectionError(host, d.categories)) return;
-  const rows = d.categories;
-  if (!rows.length) { host.replaceChildren(el("div", { class: "empty" }, "No expenses saved in this period.")); return; }
-  const max = Math.max(...rows.map((r) => r.saved));
-  host.replaceChildren(table(["Category", "Saved", "Changed", "Auto-saved", "From dictionary", "People"],
-    rows.map((r) => [
-      el("span", {}, el("span", { class: "minibar", style: `width:${Math.max(2, 80 * r.saved / max)}px` }), r.category),
-      nf.format(r.saved), pct(r.corrected, r.saved), pct(r.auto_saved, r.saved), pct(r.from_dictionary, r.saved), nf.format(r.users),
-    ]), 1, 560));
+function renderUsersKpi(d) {
+  const host = $("#k-users");
+  if (sectionError(host, d.kpis)) return;
+  const k = d.kpis, c = k.current, p = k.previous, L = d.local;
+  const left = c.blocked_bot + L.deleted_in_period;
+  host.replaceChildren(
+    tile("Users", compact(k.total_users), null, el("span", {}, "all time, excluding deleted")),
+    tile("Active users", compact(c.active_users), null, deltaNode(c.active_users, p.active_users, true)),
+    tile("New users", compact(c.new_users), null, deltaNode(c.new_users, p.new_users, true)),
+    tile("Left", compact(left), null,
+      el("span", {}, `${nf.format(c.blocked_bot)} blocked the bot · ${nf.format(L.deleted_in_period)} deleted their data`
+        + (L.restored_in_period ? ` (${L.restored_in_period} restored)` : "")),
+      "Blocked the bot in Telegram, or used 🗑 Delete my data, in this period"),
+  );
+}
+
+function renderTrafficKpi(d) {
+  const host = $("#k-traffic");
+  if (sectionError(host, d.kpis)) return;
+  const c = d.kpis.current, p = d.kpis.previous;
+  host.replaceChildren(
+    tile("Requests", compact(c.requests), null, deltaNode(c.requests, p.requests, true), "Every message, command and button tap"),
+    tile("Messages to the AI", compact(c.ai_messages), null,
+      el("span", {}, `${nf.format(c.text_messages)} text · ${nf.format(c.voice_messages)} voice · ${nf.format(c.uploads)} Action Button`)),
+    tile("Voice transcribed", minutes(c.audio_seconds), null, el("span", {}, "by Whisper on this Mac")),
+    tile("Daily-limit hits", compact(c.limits_hit), null,
+      el("span", {}, `${nf.format(d.local.at_limit_today)} ${d.local.at_limit_today === 1 ? "person" : "people"} at a limit today`)),
+  );
+}
+
+function renderAiKpi(d) {
+  const host = $("#k-ai"), cfg = d.local.config;
+  $("#ai-title").textContent = `AI usage · ${cfg.llm_provider} ${cfg.llm_model}`;
+  if (sectionError(host, d.kpis)) return;
+  const k = d.kpis, c = k.current, p = k.previous;
+  const now = cost(c.tokens_in, c.tokens_out, cfg), before = cost(p.tokens_in, p.tokens_out, cfg);
+  const month = cost(k.month_tokens_in, k.month_tokens_out, cfg);
+  const today = new Date(), dim = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
+  const perMsg = c.ai_calls ? Math.round((c.tokens_in + c.tokens_out) / c.ai_calls) : null;
+  const noPrice = el("span", {}, "set LLM_PRICE_INPUT / LLM_PRICE_OUTPUT in .env");
+  host.replaceChildren(
+    tile("Tokens", compact(c.tokens_in + c.tokens_out), null,
+      el("span", {}, `${compact(c.tokens_in)} in · ${compact(c.tokens_out)} out · `, deltaNode(c.tokens_in + c.tokens_out, p.tokens_in + p.tokens_out, false))),
+    tile("Cost in this period", now == null ? "–" : usd(now), null, now == null ? noPrice : deltaNode(now, before, false),
+      `At $${cfg.price_input} / $${cfg.price_output} per million tokens (in / out)`),
+    tile("Cost this month", month == null ? "–" : usd(month), null,
+      month == null ? noPrice : el("span", {}, `on track for ~${usd(month / today.getDate() * dim)} this month`)),
+    tile("Tokens per message", perMsg == null ? "–" : compact(perMsg), null,
+      el("span", {}, `${nf.format(c.ai_calls)} AI calls`)),
+  );
+}
+
+function renderIssuesKpi(d) {
+  const host = $("#k-issues");
+  if (sectionError(host, d.kpis)) return;
+  const c = d.kpis.current, p = d.kpis.previous, L = d.local;
+  const tapped = c.saved_as_suggested + c.saved_corrected;
+  host.replaceChildren(
+    tile("Errors", compact(c.errors), null,
+      el("span", {}, c.ai_messages ? `${pct(c.errors, c.ai_messages, 1)} of messages · ` : "", deltaNode(c.errors, p.errors, false))),
+    tile("Telegram outages", L.down_now ? "down now" : compact(L.outages), null,
+      el("span", {}, L.outages ? `${minutes(L.downtime_seconds)} unreachable in total` : "none in this period"),
+      "Times this Mac couldn't reach Telegram (sleep, Wi-Fi). Messages wait on Telegram's side."),
+    tile("Response time (p95)", secs(c.p95_ms), null, el("span", {}, `median ${secs(c.p50_ms)}`)),
+    tile("AI guessed right", tapped ? (100 * c.saved_as_suggested / tapped).toFixed(0) : "–", tapped ? "%" : null,
+      el("span", {}, tapped ? `of ${nf.format(tapped)} proposals confirmed by a tap` : "no taps yet"),
+      "Share of confirmed proposals saved with the suggested category, without changing it"),
+  );
+}
+
+function renderCharts(d) {
+  const s1 = d.series;
+  const ids = ["#c-active", "#c-new", "#c-messages", "#c-tokens", "#c-errors"];
+  if (s1 && s1.error) { ids.forEach((id) => sectionError($(id), s1)); return; }
+  const pts = s1.points, unit = s1.unit;
+  lineChart($("#c-active"), pts, unit, { key: "active_users", label: "active users", color: "--series-1" });
+  columnChart($("#c-new"), pts, unit, [{ key: "new_users", label: "new users", color: "--series-1" }]);
+  columnChart($("#c-messages"), pts, unit, [
+    { key: "text", label: "Text", color: "--series-1" },
+    { key: "voice", label: "Voice", color: "--series-2" },
+    { key: "upload", label: "Action Button", color: "--series-3" },
+  ]);
+  columnChart($("#c-tokens"), pts, unit, [
+    { key: "tokens_in", label: "Prompt (in)", color: "--series-1" },
+    { key: "tokens_out", label: "Answer (out)", color: "--series-2" },
+  ]);
+  columnChart($("#c-errors"), pts, unit, [{ key: "errors", label: "errors", color: "--critical" }]);
 }
 
 const EVENT_NAMES = { text: "Text", voice: "Voice note", upload_audio: "Action Button (audio)", upload_text: "Action Button (text)" };
 function renderLatency(d) {
   const host = $("#t-latency");
   if (sectionError(host, d.latency)) return;
-  if (!d.latency.length) { host.replaceChildren(el("div", { class: "empty" }, "No proposals in this period.")); return; }
-  host.replaceChildren(table(["Input", "Messages", "Median", "p95", "Slowest"],
-    d.latency.map((r) => [EVENT_NAMES[r.event_type] || r.event_type, nf.format(r.n), secs(r.p50_ms), secs(r.p95_ms), secs(r.max_ms)]), 1, 420));
-}
-
-function renderDict(d) {
-  const host = $("#t-dict"), L = d.local, cfg = L.config;
-  const lim = (v) => v > 0 ? nf.format(v) : "no limit";
-  const dict = d.dictionary && !d.dictionary.error ? d.dictionary : null;
-  const item = (k, v, flag) => el("div", {}, el("dt", {}, k), el("dd", { class: flag ? `flag-${flag}` : null }, v));
-  host.replaceChildren(
-    item("Known merchants & items", dict ? nf.format(dict.variants) : "–"),
-    item("…learned from people's choices", dict ? nf.format(dict.learned) : "–"),
-    item("…new in this period", dict ? nf.format(dict.new_in_period) : "–"),
-    item("Messages to the AI today", nf.format(L.usage_today.text + L.usage_today.voice)),
-    item("People at a daily limit today", nf.format(L.at_limit_today), L.at_limit_today ? "warn" : null),
-    item("Daily limit per person", `${lim(cfg.daily_text_limit)} texts · ${lim(cfg.daily_voice_limit)} voice`),
-    item("Longest voice note", cfg.max_voice_seconds > 0 ? `${cfg.max_voice_seconds} s` : "no limit"),
-  );
+  if (!d.latency.length) { host.replaceChildren(el("div", { class: "empty" }, "No AI messages in this period.")); return; }
+  host.replaceChildren(table(["Input", "Messages", "Median", "p95", "Tokens / msg"],
+    d.latency.map((r) => [EVENT_NAMES[r.event_type] || r.event_type, nf.format(r.n), secs(r.p50_ms), secs(r.p95_ms),
+      r.avg_tokens == null ? "–" : compact(r.avg_tokens)]), 1, 420));
 }
 
 function renderUsers(d) {
@@ -642,8 +649,9 @@ function renderUsers(d) {
   const st = d.local.user_state, cfg = d.local.config;
   const blocked = new Set(st.blocked);
   if (!d.users.length) { host.replaceChildren(el("div", { class: "empty" }, "Nobody used the bot in this period.")); return; }
-  const role = (uid) => uid === st.owner ? "👑 you" : blocked.has(uid) ? "🚫 blocked" :
-    st.households[uid] === "owner" ? "🏠 household creator" : st.households[uid] ? "👤 household member" : "🙂 on their own";
+  const role = (u) => u.user_id === st.owner ? "👑 you" : blocked.has(u.user_id) ? "🚫 blocked by you" :
+    u.membership === "bot_blocked" ? "🔕 blocked the bot" :
+    st.households[u.user_id] === "owner" ? "🏠 household creator" : st.households[u.user_id] ? "👤 household member" : "🙂 on their own";
   const today = (uid) => {
     const u = st.usage_today[uid] || {};
     if (Number(uid) === st.owner) return el("span", { class: "muted" }, `${u.text || 0} · ${u.voice || 0} (no limit)`);
@@ -651,16 +659,16 @@ function renderUsers(d) {
     const full = (cfg.daily_text_limit && (u.text || 0) >= cfg.daily_text_limit) || (cfg.daily_voice_limit && (u.voice || 0) >= cfg.daily_voice_limit);
     return el("span", { class: full ? "flag-warn" : null }, txt);
   };
-  host.replaceChildren(table(["Person", "Role", "Actions", "To the AI", "Saved", "Errors", "Today (text · voice)", "Last seen"],
+  host.replaceChildren(table(["Person", "Status", "Actions", "To the AI", "Tokens", "Errors", "Today (text · voice)", "Last seen"],
     d.users.map((u) => [
       el("span", {}, u.name || (u.username ? "@" + u.username : "—"),
         el("div", { class: "muted", style: "font-size:12px" }, [u.username ? "@" + u.username : null, `id ${u.user_id}`].filter(Boolean).join(" · "))),
-      el("span", { class: "badge" }, role(u.user_id)),
-      nf.format(u.actions), nf.format(u.ai_messages), nf.format(u.saved),
+      el("span", { class: "badge" }, role(u)),
+      nf.format(u.actions), nf.format(u.ai_messages), compact(u.tokens),
       u.errors ? el("span", { class: "err" }, nf.format(u.errors)) : "0",
       today(String(u.user_id)),
       u.last_seen ? ago(u.last_seen) : "—",
-    ]), 2, 720));
+    ]), 2, 760));
   $("#users-desc").textContent = `Everyone active in this period, most active first (${d.users.length}${d.users.length === 100 ? "+" : ""}). Block someone in the bot with /block <id>.`;
 }
 
@@ -673,16 +681,23 @@ function renderErrors(d) {
     e.username ? "@" + e.username : String(e.user_id ?? "—"),
     [e.event_type, e.command, e.button_action].filter(Boolean).join(" · ") + (e.outcome !== "error" ? ` (${e.outcome})` : ""),
     el("span", { class: "errmsg" }, (e.error || "").slice(0, 240)),
-  ]), 9, 640));
+  ]), 9, 560));
 }
 
 function renderHealth(d) {
   const L = d.local, cfg = L.config, host = $("#health");
   const item = (k, v, flag) => el("div", {}, el("dt", {}, k), el("dd", { class: flag ? `flag-${flag}` : null }, v));
-  const idle = L.last_update_at ? (Date.now() - new Date(L.last_update_at)) / 3600000 : null;
+  const seen = Array.isArray(d.users) ? d.users.map((u) => u.last_seen).filter(Boolean).sort().pop() : null;
+  const lastMsg = L.last_update_at || seen || null;   // since this start, else the last activity in the log
+  const idle = lastMsg ? (Date.now() - new Date(lastMsg)) / 3600000 : null;
+  const lim = (v) => v > 0 ? nf.format(v) : "no limit";
+  const dict = d.dictionary && !d.dictionary.error ? d.dictionary : null;
   host.replaceChildren(
     item("Running for", duration(L.started_at)),
-    item("Last message received", ago(L.last_update_at), idle != null && idle > 24 ? "warn" : null),
+    item("Last message received", lastMsg ? ago(lastMsg) + (L.last_update_at ? "" : " (before restart)") : "none yet",
+      idle != null && idle > 24 ? "warn" : null),
+    item("Telegram connection", L.down_now ? "down now, retrying" : L.last_outage ? `ok · last outage ${ago(L.last_outage.started_at)}` : "ok",
+      L.down_now ? "bad" : null),
     item("Waiting for an answer", `${nf.format(L.pending)}${L.pending_oldest ? " · oldest " + ago(L.pending_oldest) : ""}`),
     item("Log rows queued", nf.format(L.log_buffer), L.log_buffer > 100 ? "warn" : null),
     item("Log rows in fallback file", nf.format(L.log_fallback_rows), L.log_fallback_rows ? "bad" : null),
@@ -690,21 +705,24 @@ function renderHealth(d) {
       ? `${nf.format(L.deletions_waiting)} · next erased ${new Date(L.next_erase_at).toLocaleDateString("en-GB", { timeZone: TZ, day: "numeric", month: "short" })}`
       : "0"),
     item("Households", `${nf.format(L.households)} (${nf.format(L.household_members)} people)`),
-    item("Blocked people", nf.format(L.blocked)),
+    item("Blocked by you", nf.format(L.blocked)),
+    item("Blocked the bot (now)", d.kpis && !d.kpis.error ? nf.format(d.kpis.blocked_bot_now) : "–"),
     item("Action Button keys", nf.format(L.upload_keys)),
     item("AI", `${cfg.llm_provider} · ${cfg.llm_model}`),
+    item("AI prices (per 1M tokens)", cfg.price_input || cfg.price_output ? `$${cfg.price_input} in · $${cfg.price_output} out` : "not set"),
     item("Voice", cfg.transcriber === "local" ? `local Whisper (${cfg.whisper_model})` : cfg.transcriber),
-    item("Categories", nf.format(cfg.categories)),
+    item("Dictionary", dict ? `${nf.format(dict.variants)} known · +${nf.format(dict.new_in_period)} in period` : "–"),
+    item("Daily limits per person", `${lim(cfg.daily_text_limit)} texts · ${lim(cfg.daily_voice_limit)} voice (≤ ${cfg.max_voice_seconds || "∞"} s)`),
     item("Auto-save", cfg.auto_save_minutes > 0 ? `after ${cfg.auto_save_minutes} min` : "off"),
     item("Upload endpoint", cfg.upload_endpoint ? "on" : "off"),
-    item("Phone access", cfg.public_url ? "public URL set" : "this Mac only"),
   );
 }
 
 function renderStatus(d) {
   const L = d.local, problems = [];
+  if (L.down_now) problems.push(["bad", "can't reach Telegram"]);
   if (L.log_fallback_rows) problems.push(["bad", "log rows in fallback file"]);
-  for (const k of ["kpis", "series", "categories", "latency", "users", "errors", "dictionary"])
+  for (const k of ["kpis", "series", "latency", "users", "errors", "dictionary"])
     if (d[k] && d[k].error) problems.push(["warn", `couldn't load ${k}`]);
   const c = d.kpis && d.kpis.current;
   if (c && c.ai_messages >= 20 && c.errors / c.ai_messages > 0.05) problems.push(["bad", "error rate above 5%"]);
@@ -717,26 +735,21 @@ function renderStatus(d) {
 function render(d) {
   DATA = d;
   TZ = (d.local && d.local.config && d.local.config.timezone) || TZ;
-  renderStatus(d); renderTiles(d); renderCharts(d); renderCategories(d); renderLatency(d); renderDict(d);
-  renderUsers(d); renderErrors(d); renderHealth(d);
-  $("#updated").textContent = `Updated ${new Date(d.generated_at).toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit" })} (${TZ}) · refreshes every 5 minutes`;
+  renderStatus(d); renderUsersKpi(d); renderTrafficKpi(d); renderAiKpi(d); renderIssuesKpi(d);
+  renderCharts(d); renderLatency(d); renderUsers(d); renderErrors(d); renderHealth(d);
+  $("#updated").textContent = `Updated ${new Date(d.generated_at).toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit" })} (${TZ}) · BigQuery numbers update every 5 minutes`;
   $("#period-note").textContent = d.series && d.series.unit === "hour" ? "Charts show hours" : "Charts show days";
 }
 
-async function load() {
+async function load(fresh) {
   document.body.classList.add("loading");
   try {
-    const r = await fetch(`/dashboard/api/metrics?days=${DAYS}`, { credentials: "same-origin", cache: "no-store" });
-    if (r.status === 401) {
-      clearInterval(timer);
-      document.body.replaceChildren(el("div", { class: "signedout" }, el("h1", {}, "📊 Expense bot"),
-        el("p", {}, "You're signed out. Open the bot and tap ▶️ Start → 📊 Dashboard for a new sign-in link.")));
-      return;
-    }
+    const r = await fetch(`/api/metrics?days=${DAYS}${fresh === true ? "&fresh=1" : ""}`, { cache: "no-store" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     render(await r.json());
   } catch (e) {
     $("#status").className = "pill bad";
-    $("#status-text").textContent = "Can't reach the bot. Is the Mac awake?";
+    $("#status-text").textContent = "Can't reach the bot. Is it running?";
   } finally {
     document.body.classList.remove("loading");
   }
@@ -751,11 +764,31 @@ document.querySelectorAll('input[name="days"]').forEach((r) => r.addEventListene
   try { localStorage.setItem("days", String(DAYS)); } catch (e) { /* ignore */ }
   load();
 }));
-$("#refresh").addEventListener("click", load);
+$("#refresh").addEventListener("click", () => { schedule(); load(true); });
 let resizeT;
 window.addEventListener("resize", () => { clearTimeout(resizeT); resizeT = setTimeout(() => DATA && renderCharts(DATA), 150); });
-timer = setInterval(() => { if (!document.hidden) load(); }, 300000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+/* auto-refresh: counts down only while the tab is visible; BigQuery numbers are cached for 5 minutes
+   on the bot's side (so this can't run up costs), the bot's own numbers are always fresh */
+let EVERY = 300, nextAt = Date.now() + EVERY * 1000;
+try { const v = Number(localStorage.getItem("every")); if ([0, 60, 300, 900, 3600].includes(v) && localStorage.getItem("every") !== null) EVERY = v; } catch (e) { /* default */ }
+$("#every").value = String(EVERY);
+function schedule() { nextAt = Date.now() + EVERY * 1000; }
+$("#every").addEventListener("change", (e) => {
+  EVERY = Number(e.target.value);
+  try { localStorage.setItem("every", String(EVERY)); } catch (err) { /* ignore */ }
+  schedule(); tick();
+});
+function tick() {
+  if (!EVERY) { $("#next").textContent = ""; return; }
+  const left = Math.max(0, Math.round((nextAt - Date.now()) / 1000));
+  $("#next").textContent = document.hidden ? "" : `next in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+  if (left === 0 && !document.hidden) { schedule(); load(); }
+}
+timer = setInterval(tick, 1000);
+tick();
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && EVERY && Date.now() >= nextAt) { schedule(); load(); }
+});
 load();
 </script>
 </body>

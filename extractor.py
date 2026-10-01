@@ -21,6 +21,19 @@ class ParsedExpense:
     expense_date: date
     merchant: str | None = None
     label: str | None = None  # the item in the user's language, for display (description stays English)
+    kind: str = "expense"  # expense | income | saving (money put aside) | withdrawal (taken out of savings)
+    goal: str | None = None  # name of the user's savings goal it goes to / comes from, if they said so
+
+
+KINDS = ("expense", "income", "saving", "withdrawal")
+
+
+@dataclass
+class ParsedGoal:
+    name: str
+    target: Decimal | None
+    currency: str
+    deadline: date | None = None
 
 
 @dataclass
@@ -37,6 +50,7 @@ class MappingContext:
     guide: str  # "- Name: description" lines
     examples: str = ""  # "variant (type) -> Category" lines from dim_spend_variants
     language: str = "en"  # the user's language; "ru" adds a Russian display label per item
+    goals: list[str] = field(default_factory=list)  # the user's open savings goals, by name
 
 
 _LANGUAGE_NAMES = {"ru": "Russian"}
@@ -44,7 +58,8 @@ _LANGUAGE_NAMES = {"ru": "Russian"}
 
 def _schema(ctx: MappingContext) -> dict:
     props = {
-        "amount": {"type": "number", "description": "Positive amount spent"},
+        "kind": {"type": "string", "enum": list(KINDS)},
+        "amount": {"type": "number", "description": "Positive amount"},
         "currency": {"type": "string", "description": "ISO 4217 code, e.g. KZT, USD"},
         "description": {
             "type": "string",
@@ -53,8 +68,13 @@ def _schema(ctx: MappingContext) -> dict:
         "merchant": {"type": "string", "description": "Shop/brand/service name as the user said it, else empty"},
         "category": {"type": "string", "enum": ctx.categories},
         "date": {"type": "string", "description": "YYYY-MM-DD"},
+        "goal": (
+            {"type": "string", "enum": [*ctx.goals, ""], "description": "Savings goal it belongs to, else empty"}
+            if ctx.goals
+            else {"type": "string", "description": "Always empty: the user has no savings goals"}
+        ),
     }
-    required = ["amount", "currency", "description", "merchant", "category", "date"]
+    required = ["kind", "amount", "currency", "description", "merchant", "category", "date", "goal"]
     if ctx.language in _LANGUAGE_NAMES:
         lang = _LANGUAGE_NAMES[ctx.language]
         props["label"] = {
@@ -97,23 +117,38 @@ def _system_prompt(today: date, ctx: MappingContext) -> str:
         if ctx.language in _LANGUAGE_NAMES
         else "there is no separate label."
     )
-    return f"""You extract personal spending records from short messages.
+    goals = (
+        "The user's savings goals: " + "; ".join(f'"{g}"' for g in ctx.goals) + ". "
+        "Set `goal` to the exact goal name when a saving or withdrawal is for one of them, else empty."
+        if ctx.goals
+        else "The user has no savings goals: `goal` is always empty."
+    )
+    return f"""You extract personal money records from short messages: spending, income and savings.
 The user writes or speaks casually, in English, Russian or Kazakh, possibly mixing languages.
 Today is {today.isoformat()} ({today.strftime('%A')}) in the user's time zone.
 
 Rules:
-- One message may contain several expenses; return each separately.
+- One message may contain several records; return each separately.
+- `kind` of each record:
+  - expense: money spent on goods, services, bills, gifts given, fees (the usual case);
+  - income: money received — salary, bonus, freelance or business payment, gift received, interest, cashback
+    ("зарплата 600000", "got paid 400k", "аванс пришёл");
+  - saving: money put aside into savings, a deposit, a piggy bank or towards a goal
+    ("отложил 50000", "put 100k into savings", "на депозит 200к", "в копилку на машину 30к");
+  - withdrawal: money taken back out of savings or a deposit ("снял 20000 с депозита", "took 50k from savings").
+  A refund, a transfer between the user's own everyday accounts, or a loan given/repaid is NOT a record.
+- {goals}
 - Amounts: understand "1.5k", "2к", "полторы тысячи", "5 штук" etc. Return a plain number.
 - If no currency is mentioned, use {config.DEFAULT_CURRENCY}. "тг", "тенге", "₸" = KZT; "$", "bucks" = USD; "руб" = RUB.
 - Dates: default to today. Resolve relative dates ("yesterday", "вчера", "on Monday") against today. Never return a future date.
-- Pick the single best category from this list:
+- For expenses, pick the single best category from this list (for income/saving/withdrawal use "Other"):
 {ctx.guide}{known}
-- If the message contains no spending at all (a greeting, a question), return an empty expenses list.
-- Income, refunds and transfers between own accounts are NOT expenses.
+- If the message contains no money records at all (a greeting, a question), return an empty expenses list.
+- `description` for non-expenses: a short English noun such as 'Salary', 'Bonus', 'Savings', 'Deposit'.
 - `description` is always in English (it is a dictionary key); {label_rule}"""
 
 
-def _to_expenses(data: dict, today: date, categories: list[str]) -> list[ParsedExpense]:
+def _to_expenses(data: dict, today: date, categories: list[str], goals: list[str] | None = None) -> list[ParsedExpense]:
     out: list[ParsedExpense] = []
     for item in data.get("expenses", []):
         try:
@@ -129,6 +164,8 @@ def _to_expenses(data: dict, today: date, categories: list[str]) -> list[ParsedE
             d = today
         if d > today or d < today - timedelta(days=366):
             d = today
+        kind = item.get("kind") if item.get("kind") in KINDS else "expense"
+        goal = item.get("goal") if kind in ("saving", "withdrawal") and item.get("goal") in (goals or []) else None
         category = item.get("category")
         if category not in categories:
             category = "Other" if "Other" in categories else categories[-1]
@@ -141,6 +178,8 @@ def _to_expenses(data: dict, today: date, categories: list[str]) -> list[ParsedE
                 category=category,
                 expense_date=d,
                 label=(item.get("label") or "").strip()[:100] or None,
+                kind=kind,
+                goal=goal,
             )
         )
     return out
@@ -151,6 +190,16 @@ def _to_expenses(data: dict, today: date, categories: list[str]) -> list[ParsedE
 # --------------------------------------------------------------------------- #
 
 _clients: dict = {}
+
+
+def _record_usage(input_tokens, output_tokens):
+    """Put the call's token counts on the interaction being logged (log_interactions.llm_*_tokens)."""
+    from interactions import note
+
+    def n(v):
+        return v if isinstance(v, int) and not isinstance(v, bool) else None
+
+    note(llm_input_tokens=n(input_tokens), llm_output_tokens=n(output_tokens))
 
 
 def _gemini_client():
@@ -196,23 +245,14 @@ async def _gemini(today: date, ctx: MappingContext, text: str | None, audio: byt
             temperature=0,
         ),
     )
+    meta = getattr(response, "usage_metadata", None)
+    _record_usage(getattr(meta, "prompt_token_count", None), getattr(meta, "candidates_token_count", None))
     return json.loads(response.text)
 
 
 async def _openai(today: date, ctx: MappingContext, text: str) -> dict:
     """ChatGPT, with strict JSON-schema output."""
-    response = await _openai_client().chat.completions.create(
-        model=config.OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": _system_prompt(today, ctx)},
-            {"role": "user", "content": text},
-        ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {"name": "expenses", "strict": True, "schema": _schema(ctx)},
-        },
-    )
-    return json.loads(response.choices[0].message.content)
+    return await _structured(_system_prompt(today, ctx), text, _schema(ctx), "expenses", "", provider="openai")
 
 
 def _claude_client():
@@ -225,24 +265,100 @@ def _claude_client():
 
 async def _claude(today: date, ctx: MappingContext, text: str) -> dict:
     """Claude, forced to answer through a tool whose input schema is the expense schema."""
+    data = await _claude_tool(
+        _system_prompt(today, ctx), text, _schema(ctx), "record_expenses",
+        "Record the money records found in the user's message (may be an empty list).",
+    )
+    return data if data is not None else {"transcript": "", "expenses": []}
+
+
+async def _claude_tool(system: str, text: str, schema: dict, name: str, description: str) -> dict | None:
     response = await _claude_client().messages.create(
         model=config.CLAUDE_MODEL,
         max_tokens=1024,
-        system=_system_prompt(today, ctx),
-        tools=[
-            {
-                "name": "record_expenses",
-                "description": "Record the expenses found in the user's message (may be an empty list).",
-                "input_schema": _schema(ctx),
-            }
-        ],
-        tool_choice={"type": "tool", "name": "record_expenses"},
+        system=system,
+        tools=[{"name": name, "description": description, "input_schema": schema}],
+        tool_choice={"type": "tool", "name": name},
         messages=[{"role": "user", "content": text}],
     )
+    usage = getattr(response, "usage", None)
+    _record_usage(getattr(usage, "input_tokens", None), getattr(usage, "output_tokens", None))
     for block in response.content:
         if block.type == "tool_use":
             return dict(block.input)
-    return {"transcript": "", "expenses": []}
+    return None
+
+
+async def _structured(system: str, text: str, schema: dict, name: str, description: str,
+                      provider: str | None = None) -> dict | None:
+    """One text-only call to the model (the configured one by default), answered as JSON matching `schema`."""
+    provider = provider or config.LLM_PROVIDER
+    if provider == "claude":
+        return await _claude_tool(system, text, schema, name, description)
+    if provider == "gemini":
+        from google.genai import types
+
+        response = await _gemini_client().aio.models.generate_content(
+            model=config.GEMINI_MODEL,
+            contents=[text],
+            config=types.GenerateContentConfig(
+                system_instruction=system, response_mime_type="application/json",
+                response_json_schema=schema, temperature=0,
+            ),
+        )
+        meta = getattr(response, "usage_metadata", None)
+        _record_usage(getattr(meta, "prompt_token_count", None), getattr(meta, "candidates_token_count", None))
+        return json.loads(response.text)
+    response = await _openai_client().chat.completions.create(
+        model=config.OPENAI_MODEL,
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": text}],
+        response_format={"type": "json_schema", "json_schema": {"name": name, "strict": True, "schema": schema}},
+    )
+    usage = getattr(response, "usage", None)
+    _record_usage(getattr(usage, "prompt_tokens", None), getattr(usage, "completion_tokens", None))
+    return json.loads(response.choices[0].message.content)
+
+
+_GOAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "description": "Short goal name in the user's own words and language, 1-4 words"},
+        "target": {"type": "number", "description": "Target amount; 0 if none was given"},
+        "currency": {"type": "string", "description": "ISO 4217 code"},
+        "deadline": {"type": "string", "description": "YYYY-MM-DD, or empty if none was given"},
+    },
+    "required": ["name", "target", "currency", "deadline"],
+    "additionalProperties": False,
+}
+
+
+async def parse_goal(text: str, sent_at: datetime | None = None) -> ParsedGoal | None:
+    """'Trip to Japan 2 million by June' -> a savings goal. None if the text names no goal."""
+    today = (sent_at.astimezone(config.TIMEZONE) if sent_at else datetime.now(config.TIMEZONE)).date()
+    system = f"""The user is creating a savings goal. Extract its name, target amount, currency and deadline.
+They write casually in English, Russian or Kazakh. Today is {today.isoformat()}.
+- Amounts: understand "2 млн", "1.5m", "500к". No currency mentioned = {config.DEFAULT_CURRENCY}; "тг"/"тенге"/"₸" = KZT, "$" = USD.
+- Deadline: resolve "by June", "к лету", "через год" against today to a date (end of that month/season); empty if none.
+- If the text has no goal in it at all, return an empty name."""
+    data = await _structured(system, text, _GOAL_SCHEMA, "savings_goal", "Record the savings goal.")
+    if not data or not (data.get("name") or "").strip():
+        return None
+    try:
+        target = Decimal(str(data.get("target") or 0)).quantize(Decimal("0.01"))
+    except InvalidOperation:
+        target = Decimal(0)
+    try:
+        deadline = date.fromisoformat(data.get("deadline") or "")
+    except ValueError:
+        deadline = None
+    if deadline is not None and (deadline <= today or deadline > today + timedelta(days=365 * 30)):
+        deadline = None
+    return ParsedGoal(
+        name=" ".join(data["name"].split())[:40],
+        target=target if target > 0 else None,
+        currency=(data.get("currency") or config.DEFAULT_CURRENCY).upper()[:3],
+        deadline=deadline,
+    )
 
 
 async def parse(
@@ -283,6 +399,6 @@ async def parse(
         data["transcript"] = transcript or ""  # the real transcript, not a model echo
 
     return ParseResult(
-        expenses=_to_expenses(data, today, ctx.categories),
+        expenses=_to_expenses(data, today, ctx.categories, ctx.goals),
         transcript=(data.get("transcript") or "").strip() or None,
     )

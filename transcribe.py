@@ -50,6 +50,11 @@ def _transcribe_local(audio: bytes, language: str | None = None) -> str:
     )
     text = " ".join(s.text.strip() for s in segments).strip()
     log.info("Whisper: language=%s (%s), %d chars", info.language, "forced" if forced else "detected", len(text))
+    duration = getattr(info, "duration", None)
+    if isinstance(duration, (int, float)):
+        from interactions import note
+
+        note(audio_seconds=round(float(duration), 1))  # how much audio this Mac transcribed
     return text
 
 

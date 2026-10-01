@@ -56,10 +56,37 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.finance.fct_expenses_123456789` (
   raw_input          STRING,              -- original text / voice transcript
   item_label         STRING,              -- item as shown to the user, in their language (added to older tables automatically)
   confirmed_by       STRING,              -- user (tapped) | auto (saved after AUTO_SAVE_MINUTES with no answer); added automatically
+  kind               STRING,              -- expense (NULL in older rows) | income | saving | withdrawal; added automatically
+  goal_id            STRING,              -- -> dim_savings_goals, for savings / withdrawals towards a goal
   created_at         TIMESTAMP NOT NULL
 )
 PARTITION BY expense_date
 CLUSTER BY category;
+-- Spending only (what reports and family totals add up):  WHERE IFNULL(kind, 'expense') = 'expense'
+-- Non-expense rows have category_id = 0 and category 'Income' / 'Savings' / 'Savings withdrawal'.
+
+------------------------------------------------------------------------------
+-- Shared: savings goals (💰 Savings → 🎯 New goal).
+------------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.finance.dim_savings_goals` (
+  goal_id        STRING NOT NULL,     -- 'g_' + 8 hex
+  user_id        INT64  NOT NULL,
+  name           STRING,
+  target_amount  NUMERIC,             -- NULL = no target
+  currency       STRING,
+  deadline       DATE,
+  created_at     TIMESTAMP,
+  closed_at      TIMESTAMP,           -- ✅ Close a goal
+  deleted_at     TIMESTAMP            -- Delete my data (cleared by Restore; erased with the rest)
+);
+
+-- Income, spending, savings and what's left, per month:
+-- SELECT DATE_TRUNC(expense_date, MONTH) AS month, currency,
+--        SUM(IF(kind = 'income', amount, 0)) AS income,
+--        SUM(IF(IFNULL(kind, 'expense') = 'expense', amount, 0)) AS spent,
+--        SUM(IF(kind = 'saving', amount, 0)) - SUM(IF(kind = 'withdrawal', amount, 0)) AS saved_net
+-- FROM `YOUR_PROJECT.finance.fct_expenses_123456789`
+-- GROUP BY 1, 2 ORDER BY 1 DESC;
 
 ------------------------------------------------------------------------------
 -- Shared: interaction log. One row per update the bot receives (every text,
@@ -91,6 +118,9 @@ CREATE TABLE IF NOT EXISTS `YOUR_PROJECT.finance.log_interactions` (
   llm_provider      STRING,
   llm_model         STRING,
   latency_ms        INT64,
+  llm_input_tokens  INT64,                -- tokens sent to the AI (added automatically to older tables)
+  llm_output_tokens INT64,                -- tokens the AI answered with
+  audio_seconds     FLOAT64,              -- audio transcribed by local Whisper
   error             STRING,
   details           JSON                 -- proposals, traceback, report period, ...
 )
@@ -116,6 +146,7 @@ CLUSTER BY user_id, event_type, outcome;
 --                | join_declined | not_creator
 --   shortcut   : shortcut_key_created | shortcut_shown | shortcut_off | shortcut_key_rotated (button)
 --   auto_save  : auto_saved (no answer within AUTO_SAVE_MINUTES) | error (retried next pass)
+--   membership : bot_blocked | bot_unblocked | membership_changed (Telegram: someone blocked / unblocked the bot)
 --   other      : unsupported | blocked
 --   edit       : edit_ignored | blocked   (edited messages are never re-processed)
 --   any        : error (handler crashed; see error + details.traceback)

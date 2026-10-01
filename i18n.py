@@ -45,6 +45,13 @@ def fmt_day(d: date, lang: str) -> str:
     return f"{day}, {d.day} {month}" if lang == "ru" else f"{day}, {month} {d.day}"
 
 
+def fmt_date(d: date, lang: str) -> str:
+    """A deadline: en 'Jun 30, 2027'   ru '30 июн 2027'."""
+    lang = lang if lang in _MONTHS_SHORT else DEFAULT_LANGUAGE
+    month = _MONTHS_SHORT[lang][d.month - 1]
+    return f"{d.day} {month} {d.year}" if lang == "ru" else f"{month} {d.day}, {d.year}"
+
+
 def fmt_month(d: date, lang: str) -> str:
     """en: 'September 2026'   ru: 'Сентябрь 2026'."""
     lang = lang if lang in _MONTHS_FULL else DEFAULT_LANGUAGE
@@ -59,6 +66,7 @@ COMMANDS = {
         ("today", "Today's totals"),
         ("week", "Last 7 days"),
         ("month", "This month"),
+        ("savings", "Income, savings and goals"),
         ("undo", "Remove the last saved expense"),
         ("categories", "Category list"),
         ("language", "Change language"),
@@ -72,6 +80,7 @@ COMMANDS = {
         ("today", "Итоги за сегодня"),
         ("week", "Последние 7 дней"),
         ("month", "Этот месяц"),
+        ("savings", "Доходы, накопления и цели"),
         ("undo", "Отменить последний расход"),
         ("categories", "Список категорий"),
         ("language", "Сменить язык"),
@@ -87,8 +96,8 @@ LEGACY_KB_MENU = ["📋 Menu", "📋 Меню"]
 
 # Added to the owner's own "/" list only.
 OWNER_COMMANDS = {
-    "en": [("dashboard", "Monitoring dashboard"), ("users", "Users by activity"), ("block", "Block a user: /block <id>"), ("unblock", "Unblock: /unblock <id>")],
-    "ru": [("dashboard", "Дашборд мониторинга"), ("users", "Пользователи по активности"), ("block", "Заблокировать: /block <id>"), ("unblock", "Разблокировать: /unblock <id>")],
+    "en": [("users", "Users by activity"), ("block", "Block a user: /block <id>"), ("unblock", "Unblock: /unblock <id>")],
+    "ru": [("users", "Пользователи по активности"), ("block", "Заблокировать: /block <id>"), ("unblock", "Разблокировать: /unblock <id>")],
 }
 
 # ---- strings ----------------------------------------------------------------
@@ -295,8 +304,8 @@ STRINGS: dict[str, dict[str, str]] = {
     "btn_fix_text": {"en": "✏️ Fix text", "ru": "✏️ Исправить текст"},
     "btn_delete_line": {"en": "🗑 Delete a line", "ru": "🗑 Удалить строку"},
     "dl_prompt": {
-        "en": "🗑 Which line should I delete? Reply with its number (1–{n}). Several at once: 3, 5",
-        "ru": "🗑 Какую строку удалить? Ответьте её номером (1–{n}). Несколько сразу: 3, 5",
+        "en": "🗑 Which line should I delete? Send its number (1–{n}). Several at once: 3, 5",
+        "ru": "🗑 Какую строку удалить? Отправьте её номер (1–{n}). Несколько сразу: 3, 5",
     },
     "dl_placeholder": {"en": "Line number", "ru": "Номер строки"},
     "dl_bad": {
@@ -324,9 +333,10 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "\n🗑 Ошибка в любой записи? В 🧾 подробном отчёте у каждой строки есть номер: нажмите 🗑 Удалить строку и отправьте номер.",
     },
     "fix_prompt": {
-        "en": "✏️ Send the corrected text as a reply to this message. What I heard (tap to copy):\n<code>{text}</code>",
-        "ru": "✏️ Отправьте исправленный текст ответом на это сообщение. Что я услышал (нажмите, чтобы скопировать):\n<code>{text}</code>",
+        "en": "✏️ Send the corrected text as your next message. What I heard (tap to copy):\n<code>{text}</code>",
+        "ru": "✏️ Отправьте исправленный текст следующим сообщением. Что я услышал (нажмите, чтобы скопировать):\n<code>{text}</code>",
     },
+    "fix_cancelled": {"en": "OK, the transcript stays as it was.", "ru": "Хорошо, расшифровка остаётся как есть."},
     "fix_placeholder": {"en": "Corrected text", "ru": "Исправленный текст"},
     "fix_replaced": {"en": "replaced by the corrected text", "ru": "заменено исправленным текстом"},
     "fix_already_saved": {
@@ -367,17 +377,6 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "🔒 Любой, у кого есть ваш ключ, может добавлять расходы в ваш аккаунт. Если ключ утёк, нажмите 🔄 Новый ключ — старый сразу перестанет работать.",
     },
     "btn_sc_new_key": {"en": "🔄 New key", "ru": "🔄 Новый ключ"},
-    "m_dashboard": {"en": "📊 Dashboard", "ru": "📊 Дашборд"},
-    "dash_link": {
-        "en": "📊 <b>Dashboard</b>\n\nYour sign-in link (works once, for {minutes} minutes):\n{link}\n\n💻 Open it on the Mac running the bot; the dashboard isn't reachable from anywhere else. That browser then stays signed in for 30 days.",
-        "ru": "📊 <b>Дашборд</b>\n\nСсылка для входа (одноразовая, действует {minutes} минут):\n{link}\n\n💻 Откройте её на Mac, где работает бот, — больше ниоткуда дашборд не доступен. После входа браузер остаётся авторизованным 30 дней.",
-    },
-    "dash_off": {"en": "The dashboard is turned off (DASHBOARD=off in .env).", "ru": "Дашборд выключен (DASHBOARD=off в .env)."},
-    "btn_dash_revoke": {"en": "🚪 Sign out everywhere", "ru": "🚪 Выйти на всех устройствах"},
-    "dash_revoked": {
-        "en": "Signed out everywhere. Every open dashboard and unused link stopped working.",
-        "ru": "Выход выполнен везде. Все открытые дашборды и неиспользованные ссылки больше не работают.",
-    },
     "btn_sc_get_key": {"en": "📲 Get my Action Button key", "ru": "📲 Получить ключ для кнопки действия"},
     "help_shortcut": {
         "en": "\n\n📲 <b>iPhone Action Button</b>\nPress the Action Button, say what you spent, tap to stop. The proposal arrives here like any other message.\n\nFirst get your personal key with the button below (or ▶️ Start → 📲 Action Button), then:\n{steps}\n\nNo Action Button? Run the Shortcut from the home screen, Siri or Back Tap instead.",
@@ -389,8 +388,8 @@ STRINGS: dict[str, dict[str, str]] = {
         "ru": "Загрузка с кнопки действия в этом боте пока не настроена. Спросите владельца бота.",
     },
     "help_owner": {
-        "en": '\n\n👑 <b>Owner</b> — no daily limits · 📊 Dashboard: key numbers on a web page · 👥 Users: who uses the bot (with IDs) · /block &lt;id&gt; and /unblock &lt;id&gt;.',
-        "ru": '\n\n👑 <b>Владелец</b> — без дневных лимитов · 📊 Дашборд: ключевые цифры на веб-странице · 👥 Пользователи: кто пользуется ботом (с ID) · /block &lt;id&gt; и /unblock &lt;id&gt;.',
+        "en": '\n\n👑 <b>Owner</b> — no daily limits · 👥 Users: who uses the bot (with IDs) · /block &lt;id&gt; and /unblock &lt;id&gt;.',
+        "ru": '\n\n👑 <b>Владелец</b> — без дневных лимитов · 👥 Пользователи: кто пользуется ботом (с ID) · /block &lt;id&gt; и /unblock &lt;id&gt;.',
     },
 
     # delete my data
@@ -641,5 +640,79 @@ STRINGS: dict[str, dict[str, str]] = {
     "help_privacy": {
         "en": "\n\n🔒 Your expenses are stored in the bot owner's Google Cloud (BigQuery). 🗑 Delete my data removes them from the bot at once and erases them for good after {days} days.",
         "ru": '\n\n🔒 Ваши расходы хранятся в Google Cloud (BigQuery) владельца бота. 🗑 Удалить мои данные — сразу убирает их из бота и навсегда стирает через {days} дней.',
+    },
+
+    # 💰 savings
+    "kind_expense": {"en": "Expense", "ru": "Расход"},
+    "kind_income": {"en": "Income", "ru": "Доход"},
+    "kind_saving": {"en": "Put aside", "ru": "Отложено"},
+    "kind_withdrawal": {"en": "From savings", "ru": "Из накоплений"},
+    "kind_question": {"en": "Type: <b>{kind}</b>? <i>({tag})</i>", "ru": "Тип: <b>{kind}</b>? <i>({tag})</i>"},
+    "pick_kind": {"en": "What is it?", "ru": "Что это?"},
+    "pick_goal": {"en": "which goal?", "ru": "на какую цель?"},
+    "btn_no_goal": {"en": "No goal", "ru": "Без цели"},
+    "goal_gone": {"en": "That goal is closed now.", "ru": "Эта цель уже закрыта."},
+    "m_savings": {"en": "💰 Savings", "ru": "💰 Накопления"},
+    "r_income": {"en": "Income", "ru": "Доход"},
+    "r_spent": {"en": "Spent", "ru": "Потрачено"},
+    "r_put_aside": {"en": "Put aside", "ru": "Отложено"},
+    "r_taken_out": {"en": "Taken from savings", "ru": "Взято из накоплений"},
+    "r_left": {"en": "Left", "ru": "Осталось"},
+    "sv_title": {"en": "Savings", "ru": "Накопления"},
+    "sv_total": {"en": "Saved in total", "ru": "Всего накоплено"},
+    "sv_rate": {"en": "Saving rate", "ru": "Доля сбережений"},
+    "sv_goals": {"en": "Goals", "ru": "Цели"},
+    "sv_no_goals": {"en": "No goals yet — tap 🎯 New goal.", "ru": "Целей пока нет — нажмите 🎯 Новая цель."},
+    "sv_reached": {"en": "🎉 reached!", "ru": "🎉 достигнута!"},
+    "sv_overdue": {"en": "the date ({date}) has passed", "ru": "срок ({date}) прошёл"},
+    "sv_per_month": {"en": "{amount}/month to make it by {date}", "ru": "{amount} в месяц, чтобы успеть к {date}"},
+    "sv_by": {"en": "by {date}", "ru": "к {date}"},
+    "sv_how": {
+        "en": "<i>Log like spending: “salary 600 000”, “put aside 50 000 for Japan”, “took 20 000 from savings”.</i>",
+        "ru": "<i>Записывайте как расходы: «зарплата 600 000», «отложил 50 000 на Японию», «снял 20 000 с накоплений».</i>",
+    },
+    "btn_new_goal": {"en": "🎯 New goal", "ru": "🎯 Новая цель"},
+    "btn_close_goal": {"en": "✅ Close a goal", "ru": "✅ Закрыть цель"},
+    "btn_close_goal_yes": {"en": "✅ Close it", "ru": "✅ Закрыть"},
+    "goal_prompt": {
+        "en": "🎯 Send the goal as your next message: a name, a target and, if you like, a date.\n"
+              "For example: <i>Trip to Japan 2 000 000 by June</i> or <i>Emergency fund 1 500 000</i>. "
+              "No currency means {currency}.",
+        "ru": "🎯 Отправьте цель следующим сообщением: название, сумму и, если хотите, срок.\n"
+              "Например: <i>Поездка в Японию 2 000 000 к июню</i> или <i>Подушка безопасности 1 500 000</i>. "
+              "Без валюты — {currency}.",
+    },
+    "goal_not_understood": {
+        "en": "I couldn't find a goal in that. Try e.g. <i>New car 5 000 000 by 2027</i> — or tap Cancel above.",
+        "ru": "Не нашёл в сообщении цели. Например: <i>Машина 5 000 000 к 2027</i> — или нажмите «Отмена» выше.",
+    },
+    "goal_cancelled": {"en": "OK, no new goal.", "ru": "Хорошо, без новой цели."},
+    "goal_exists": {"en": "You already have a goal called <b>{name}</b>.", "ru": "У вас уже есть цель <b>{name}</b>."},
+    "goal_too_many": {
+        "en": "You can have up to {n} open goals. Close one first.",
+        "ru": "Можно держать до {n} открытых целей. Сначала закройте одну.",
+    },
+    "goal_failed": {"en": "⚠️ Couldn't save that right now. Try again in a minute.", "ru": "⚠️ Не удалось сохранить. Попробуйте через минуту."},
+    "goal_target": {"en": "target {amount}", "ru": "цель {amount}"},
+    "goal_needs": {"en": "about {amount}/month", "ru": "примерно {amount} в месяц"},
+    "goal_created": {
+        "en": "🎯 New goal: <b>{name}</b>\n{details}\n\nTo add to it, say e.g. “put aside 50 000 for {example}”.",
+        "ru": "🎯 Новая цель: <b>{name}</b>\n{details}\n\nЧтобы пополнить, напишите, например: «отложил 50 000 на {example}».",
+    },
+    "goal_which_close": {"en": "Which goal should I close?", "ru": "Какую цель закрыть?"},
+    "goal_close_confirm": {
+        "en": "Close <b>{name}</b>? Money already put aside for it stays in your savings total.",
+        "ru": "Закрыть цель <b>{name}</b>? Уже отложенные на неё деньги останутся в общих накоплениях.",
+    },
+    "goal_closed": {"en": "✅ Closed <b>{name}</b>.", "ru": "✅ Цель <b>{name}</b> закрыта."},
+    "help_savings": {
+        "en": "\n\n💰 <b>Income & savings</b> — log them like spending: “salary 600 000”, “put aside 50 000”, "
+              "“took 20 000 from the deposit”. Reports then show income, savings and what's left; "
+              "💰 Savings shows your total, the month and your 🎯 goals with what's still needed per month. "
+              "✏️ switches an entry between expense, income and savings.",
+        "ru": "\n\n💰 <b>Доходы и накопления</b> — записывайте как расходы: «зарплата 600 000», «отложил 50 000», "
+              "«снял 20 000 с депозита». В отчётах появятся доход, отложенное и остаток; "
+              "💰 Накопления покажут общую сумму, месяц и 🎯 цели — сколько ещё нужно в месяц. "
+              "✏️ переключает запись между расходом, доходом и накоплением.",
     },
 }
