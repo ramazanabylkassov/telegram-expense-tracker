@@ -86,226 +86,7 @@ class PendingStore:
                    key_hash TEXT NOT NULL UNIQUE,  -- sha256 of the key; the key itself is only shown once
                    created_at TEXT NOT NULL)"""
         )
-        self.db.execute(
-            """CREATE TABLE IF NOT EXISTS usage (
-                   user_id INTEGER NOT NULL,
-                   day TEXT NOT NULL,              -- local date (TIMEZONE)
-                   kind TEXT NOT NULL,             -- text | voice
-                   n INTEGER NOT NULL,
-                   PRIMARY KEY (user_id, day, kind))"""
-        )
-        self.db.execute(
-            """CREATE TABLE IF NOT EXISTS voice_notes (
-                   gid TEXT PRIMARY KEY,           -- links the transcript to its proposals (payload "group")
-                   user_id INTEGER NOT NULL,
-                   chat_id INTEGER,
-                   transcript_message_id INTEGER,  -- the 🎙 message (replying to it = a correction)
-                   prompt_message_id INTEGER,      -- the "send the corrected text" message
-                   transcript TEXT NOT NULL,       -- current text (the last correction, if any)
-                   source TEXT NOT NULL,           -- voice | upload_audio
-                   sent_at TEXT NOT NULL,          -- when the recording was sent: dates stay relative to it
-                   proposed INTEGER NOT NULL DEFAULT 0,
-                   saved INTEGER NOT NULL DEFAULT 0,
-                   fixes INTEGER NOT NULL DEFAULT 0,
-                   created_at TEXT NOT NULL)"""
-        )
-        self.db.execute(
-            """CREATE TABLE IF NOT EXISTS report_rows (
-                   report_id TEXT NOT NULL,        -- one detailed report as sent
-                   user_id INTEGER NOT NULL,
-                   idx INTEGER NOT NULL,           -- the line number shown in the report
-                   expense_id TEXT NOT NULL,
-                   summary TEXT NOT NULL,          -- plain text of the line, for the confirmation
-                   deleted INTEGER NOT NULL DEFAULT 0,
-                   created_at TEXT NOT NULL,
-                   PRIMARY KEY (report_id, idx))"""
-        )
-        self.db.execute(
-            """CREATE TABLE IF NOT EXISTS report_messages (
-                   report_id TEXT NOT NULL,
-                   user_id INTEGER NOT NULL,
-                   chat_id INTEGER NOT NULL,
-                   message_id INTEGER NOT NULL,    -- the report itself or its "which line?" prompt
-                   created_at TEXT NOT NULL,
-                   PRIMARY KEY (chat_id, message_id))"""
-        )
-        self.db.execute(
-            """CREATE TABLE IF NOT EXISTS outages (
-                   started_at TEXT NOT NULL,       -- first failed attempt to reach Telegram (UTC)
-                   ended_at TEXT)                  -- first update received afterwards; NULL = still down"""
-        )
-        self.db.execute(
-            """CREATE TABLE IF NOT EXISTS deletions (
-                   user_id INTEGER NOT NULL,
-                   deleted_at TEXT NOT NULL,       -- when they confirmed "delete my data" (UTC)
-                   purge_after TEXT NOT NULL,      -- hard delete from this moment on
-                   log_cutoff TEXT NOT NULL,       -- log rows up to here belong to the deleted data
-                   archive_table TEXT,             -- deleted_fct_expenses_<id>_<ts>, NULL if they had none
-                   snapshot TEXT,                  -- settings to give back on restore (JSON)
-                   status TEXT NOT NULL DEFAULT 'soft',   -- soft | restored | purged
-                   PRIMARY KEY (user_id, deleted_at))"""
-        )
-        self.db.execute(
-            """CREATE TABLE IF NOT EXISTS blocked_users (
-                   user_id INTEGER PRIMARY KEY,
-                   blocked_at TEXT NOT NULL)"""
-        )
         self.db.commit()
-
-    # ---- voice transcripts that can be corrected ----------------------------- #
-
-    VOICE_NOTE_DAYS = 7  # a transcript can be corrected for a week
-
-    def add_voice_note(self, gid: str, user_id: int, transcript: str, source: str, sent_at: str):
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.VOICE_NOTE_DAYS)).isoformat()
-        self.db.execute("DELETE FROM voice_notes WHERE created_at < ?", (cutoff,))
-        self.db.execute(
-            "INSERT INTO voice_notes (gid, user_id, transcript, source, sent_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (gid, user_id, transcript, source, sent_at, _now()),
-        )
-        self.db.commit()
-
-    def set_voice_note_message(self, gid: str, chat_id: int, message_id: int):
-        self.db.execute("UPDATE voice_notes SET chat_id = ?, transcript_message_id = ? WHERE gid = ?",
-                        (chat_id, message_id, gid))
-        self.db.commit()
-
-    def set_voice_note_prompt(self, gid: str, message_id: int):
-        self.db.execute("UPDATE voice_notes SET prompt_message_id = ? WHERE gid = ?", (message_id, gid))
-        self.db.commit()
-
-    _VN_COLS = ("gid", "user_id", "chat_id", "transcript_message_id", "prompt_message_id", "transcript",
-                "source", "sent_at", "proposed", "saved", "fixes", "created_at")
-
-    def voice_note(self, gid: str) -> dict | None:
-        row = self.db.execute(f"SELECT {', '.join(self._VN_COLS)} FROM voice_notes WHERE gid = ?", (gid,)).fetchone()
-        return dict(zip(self._VN_COLS, row)) if row else None
-
-    def voice_note_for_reply(self, user_id: int, chat_id: int, message_id: int) -> dict | None:
-        """The transcript a reply is correcting: a reply to the 🎙 message or to the fix prompt."""
-        row = self.db.execute(
-            f"SELECT {', '.join(self._VN_COLS)} FROM voice_notes WHERE user_id = ? AND chat_id = ? "
-            f"AND (transcript_message_id = ? OR prompt_message_id = ?)",
-            (user_id, chat_id, message_id, message_id),
-        ).fetchone()
-        return dict(zip(self._VN_COLS, row)) if row else None
-
-    def voice_note_counts(self, gid: str, proposed: int = 0, saved: int = 0):
-        self.db.execute("UPDATE voice_notes SET proposed = proposed + ?, saved = saved + ? WHERE gid = ?",
-                        (proposed, saved, gid))
-        self.db.commit()
-
-    def voice_note_fixed(self, gid: str, transcript: str):
-        self.db.execute("UPDATE voice_notes SET transcript = ?, fixes = fixes + 1 WHERE gid = ?", (transcript, gid))
-        self.db.commit()
-
-    def pending_in_group(self, user_id: int, gid: str) -> list[tuple[str, int | None, int | None]]:
-        """Unanswered proposals that came from this transcript: (pid, chat_id, message_id)."""
-        rows = self.db.execute(
-            "SELECT id, chat_id, message_id, payload FROM pending WHERE user_id = ?", (user_id,)
-        ).fetchall()
-        return [(pid, c, m) for pid, c, m, p in rows if json.loads(p).get("group") == gid]
-
-    # ---- detailed reports: line number -> expense ------------------------------ #
-
-    REPORT_DAYS = 7  # lines of a report can be deleted by number for a week
-
-    def save_report(self, report_id: str, user_id: int, rows: list[tuple[int, str, str]]):
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=self.REPORT_DAYS)).isoformat()
-        self.db.execute("DELETE FROM report_rows WHERE created_at < ?", (cutoff,))
-        self.db.execute("DELETE FROM report_messages WHERE created_at < ?", (cutoff,))
-        now = _now()
-        self.db.executemany(
-            "INSERT INTO report_rows (report_id, user_id, idx, expense_id, summary, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-            [(report_id, user_id, idx, eid, summary, now) for idx, eid, summary in rows],
-        )
-        self.db.commit()
-
-    def add_report_message(self, report_id: str, user_id: int, chat_id: int, message_id: int):
-        self.db.execute("INSERT OR REPLACE INTO report_messages VALUES (?, ?, ?, ?, ?)",
-                        (report_id, user_id, chat_id, message_id, _now()))
-        self.db.commit()
-
-    def report_for_message(self, user_id: int, chat_id: int, message_id: int) -> str | None:
-        row = self.db.execute(
-            "SELECT report_id FROM report_messages WHERE user_id = ? AND chat_id = ? AND message_id = ?",
-            (user_id, chat_id, message_id),
-        ).fetchone()
-        return row[0] if row else None
-
-    def report_rows(self, report_id: str, user_id: int) -> dict[int, dict]:
-        rows = self.db.execute(
-            "SELECT idx, expense_id, summary, deleted FROM report_rows WHERE report_id = ? AND user_id = ?",
-            (report_id, user_id),
-        ).fetchall()
-        return {i: {"idx": i, "expense_id": e, "summary": s_, "deleted": bool(d)} for i, e, s_, d in rows}
-
-    def mark_expense_deleted(self, expense_id: str):
-        """In every open report, so a line deleted from one report shows as deleted in the others."""
-        self.db.execute("UPDATE report_rows SET deleted = 1 WHERE expense_id = ?", (expense_id,))
-        self.db.commit()
-
-    def saved_entry(self, expense_id: str) -> tuple[int, int, str, dict | None] | None:
-        """(chat_id, message_id, summary, learned) of a save, if its undo history is still here."""
-        row = self.db.execute(
-            "SELECT chat_id, message_id, summary, learned FROM saved WHERE expense_id = ?", (expense_id,)
-        ).fetchone()
-        return (*row[:3], json.loads(row[3]) if row[3] else None) if row else None
-
-    # ---- Telegram outages (for 🖥 App status) ----------------------------------- #
-
-    def outage_started(self, at: str):
-        self.db.execute("INSERT INTO outages VALUES (?, NULL)", (at,))
-        self.db.commit()
-
-    def outage_ended(self, at: str):
-        self.db.execute("UPDATE outages SET ended_at = ? WHERE ended_at IS NULL", (at,))
-        self.db.commit()
-
-    def outages_since(self, since: str) -> list[tuple[str, str | None]]:
-        return self.db.execute(
-            "SELECT started_at, ended_at FROM outages WHERE started_at >= ? OR ended_at IS NULL OR ended_at >= ? "
-            "ORDER BY started_at", (since, since)
-        ).fetchall()
-
-    # ---- daily limits and blocking -------------------------------------------- #
-
-    def count_use(self, user_id: int, kind: str, day: str) -> int:
-        """Add one use of `kind` today and return today's total, including this one."""
-        self.db.execute(
-            "INSERT INTO usage VALUES (?, ?, ?, 1) "
-            "ON CONFLICT(user_id, day, kind) DO UPDATE SET n = n + 1",
-            (user_id, day, kind),
-        )
-        self.db.execute("DELETE FROM usage WHERE day < date(?, '-7 days')", (day,))  # keep it small
-        self.db.commit()
-        return self.db.execute(
-            "SELECT n FROM usage WHERE user_id = ? AND day = ? AND kind = ?", (user_id, day, kind)
-        ).fetchone()[0]
-
-    def uncount_use(self, user_id: int, kind: str, day: str):
-        """Give a use back (the message never reached the AI)."""
-        self.db.execute(
-            "UPDATE usage SET n = MAX(n - 1, 0) WHERE user_id = ? AND day = ? AND kind = ?", (user_id, day, kind)
-        )
-        self.db.commit()
-
-    def is_blocked(self, user_id: int | None) -> bool:
-        return user_id is not None and self.db.execute(
-            "SELECT 1 FROM blocked_users WHERE user_id = ?", (user_id,)
-        ).fetchone() is not None
-
-    def block(self, user_id: int):
-        self.db.execute("INSERT OR REPLACE INTO blocked_users VALUES (?, ?)", (user_id, _now()))
-        self.db.commit()
-
-    def unblock(self, user_id: int) -> bool:
-        cur = self.db.execute("DELETE FROM blocked_users WHERE user_id = ?", (user_id,))
-        self.db.commit()
-        return cur.rowcount > 0
-
-    def blocked_ids(self) -> set[int]:
-        return {r[0] for r in self.db.execute("SELECT user_id FROM blocked_users")}
 
     # ---- personal upload keys (iPhone Action Button / Shortcut) -------------- #
 
@@ -344,16 +125,6 @@ class PendingStore:
         )
         self.db.commit()
         return pid
-
-    def update(self, pid: str, **changes) -> dict | None:
-        """Change fields of a waiting proposal (e.g. ✏️ switched it from expense to income)."""
-        item = self.get(pid)
-        if item is None:
-            return None
-        item.update(changes)
-        self.db.execute("UPDATE pending SET payload = ? WHERE id = ?", (json.dumps(item, ensure_ascii=False), pid))
-        self.db.commit()
-        return item
 
     def set_message(self, pid: str, chat_id: int, message_id: int):
         """Where the proposal was shown, so it can be updated when it auto-saves."""
@@ -434,57 +205,9 @@ class PendingStore:
 
     def forget_user(self, user_id: int):
         """Everything this machine keeps about the person: proposals, undo history, settings."""
-        # Kept on purpose: a block and today's usage, so deleting your data isn't a way around them.
-        for table in ("pending", "saved", "report_prefs", "user_settings", "upload_keys", "voice_notes",
-                      "report_rows", "report_messages"):
+        for table in ("pending", "saved", "report_prefs", "user_settings", "upload_keys"):
             self.db.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
         self.db.commit()
-
-    def add_deletion(self, user_id: int, deleted_at: str, purge_after: str, log_cutoff: str,
-                     archive_table: str | None, snapshot: dict):
-        self.db.execute(
-            "INSERT INTO deletions (user_id, deleted_at, purge_after, log_cutoff, archive_table, snapshot) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (user_id, deleted_at, purge_after, log_cutoff, archive_table, json.dumps(snapshot)),
-        )
-        self.db.commit()
-
-    def active_deletion(self, user_id: int) -> dict | None:
-        """Their latest soft deletion that can still be restored."""
-        row = self.db.execute(
-            "SELECT user_id, deleted_at, purge_after, log_cutoff, archive_table, snapshot FROM deletions "
-            "WHERE user_id = ? AND status = 'soft' ORDER BY deleted_at DESC LIMIT 1", (user_id,)
-        ).fetchone()
-        return self._deletion(row) if row else None
-
-    def due_deletions(self, now: str) -> list[dict]:
-        rows = self.db.execute(
-            "SELECT user_id, deleted_at, purge_after, log_cutoff, archive_table, snapshot FROM deletions "
-            "WHERE status = 'soft' AND purge_after <= ? ORDER BY purge_after", (now,)
-        ).fetchall()
-        return [self._deletion(r) for r in rows]
-
-    def soft_deletions(self) -> list[dict]:
-        rows = self.db.execute(
-            "SELECT user_id, deleted_at, purge_after, log_cutoff, archive_table, snapshot FROM deletions "
-            "WHERE status = 'soft' ORDER BY purge_after"
-        ).fetchall()
-        return [self._deletion(r) for r in rows]
-
-    def finish_deletion(self, user_id: int, deleted_at: str, status: str):
-        """restored, or purged (then the snapshot goes too: nothing of theirs is kept)."""
-        self.db.execute(
-            "UPDATE deletions SET status = ?, snapshot = CASE WHEN ? = 'purged' THEN NULL ELSE snapshot END "
-            "WHERE user_id = ? AND deleted_at = ?", (status, status, user_id, deleted_at)
-        )
-        self.db.commit()
-
-    @staticmethod
-    def _deletion(row) -> dict:
-        keys = ("user_id", "deleted_at", "purge_after", "log_cutoff", "archive_table", "snapshot")
-        d = dict(zip(keys, row))
-        d["snapshot"] = json.loads(d["snapshot"]) if d["snapshot"] else {}
-        return d
 
     def add_log_purge(self, user_id: int, cutoff: str):
         self.db.execute(
@@ -522,9 +245,6 @@ FACT_SCHEMA = [
     bigquery.SchemaField("raw_input", "STRING"),
     bigquery.SchemaField("item_label", "STRING"),  # item name in the user's language at saving time
     bigquery.SchemaField("confirmed_by", "STRING"),  # user (tapped) | auto (no answer in AUTO_SAVE_MINUTES)
-    # expense | income | saving (put aside) | withdrawal (taken out of savings). NULL = expense (older rows).
-    bigquery.SchemaField("kind", "STRING"),
-    bigquery.SchemaField("goal_id", "STRING"),  # dim_savings_goals.goal_id for savings/withdrawals towards a goal
     bigquery.SchemaField("created_at", "TIMESTAMP", mode="REQUIRED"),
 ]
 
@@ -613,22 +333,6 @@ class Warehouse:
             table.schema = [*table.schema, *[bigquery.SchemaField(f.name, f.field_type) for f in missing]]
             self.client.update_table(table, ["schema"])
             log.info("%s: added columns %s", table.table_id, [f.name for f in missing])
-        return bool(missing)
-
-    def migrate_fact_tables(self) -> int:
-        """Give every existing fct_expenses_* table the columns added since it was created. Needed at
-        startup: a wildcard query (family totals) uses the newest table's schema, and a query naming
-        `kind` must find it in every table. Metadata only, so free. Returns how many tables changed."""
-        changed = 0
-        for t in self.client.list_tables(self.ds):
-            name = t.table_id
-            if not name.startswith(config.FACT_TABLE_PREFIX) or not name[len(config.FACT_TABLE_PREFIX):].isdigit():
-                continue
-            uid = int(name[len(config.FACT_TABLE_PREFIX):])
-            if self._add_missing_fact_columns(uid):
-                changed += 1
-            self._fact_tables_ready.add(uid)
-        return changed
 
     def _count(self, table: str) -> int:
         return next(iter(self.client.query(f"SELECT COUNT(*) AS n FROM `{table}`").result())).n
@@ -793,75 +497,27 @@ class Warehouse:
 
     # ---- "delete my data" ---------------------------------------------------- #
 
-    # ---- "delete my data": soft delete now, hard delete after the retention period ---- #
-
-    def archive_table_name(self, user_id: int, when: datetime) -> str:
-        # Outside the fct_expenses_* wildcard, so reports, family totals and v_expenses_all never see it.
-        return f"{self.ds}.deleted_{config.FACT_TABLE_PREFIX}{int(user_id)}_{when:%Y%m%d%H%M%S}"
-
-    def soft_delete_user_data(self, user_id: int, retention_days: int, when: datetime) -> tuple[int, str | None]:
-        """Move the person's expense table to an archive table that BigQuery itself deletes after
-        `retention_days` (+1 day of slack, so the bot's own hard delete normally comes first), and mark
-        their dim_users row deleted. Returns (expenses archived, archive table or None)."""
-        src = self.fact_table(user_id)
+    def delete_user_data(self, user_id: int) -> int:
+        """Drop the person's expense table and their dim_users row. Returns how many expenses were deleted.
+        Their log rows are removed separately (purge_user_log), because recently streamed rows
+        can't be deleted until BigQuery moves them out of its streaming buffer."""
+        table = self.fact_table(user_id)
         try:
-            row = next(iter(self.client.query(f"SELECT COUNT(*) AS n FROM `{src}`").result()), None)
-            n = row.n if row is not None else 0
+            n = next(iter(self.client.query(f"SELECT COUNT(*) AS n FROM `{table}`").result())).n
         except NotFound:
-            n, dst = 0, None
-        else:
-            dst = self.archive_table_name(user_id, when)
-            self.client.copy_table(src, dst).result()  # copy jobs are free
-            table = self.client.get_table(dst)
-            table.expires = when + timedelta(days=retention_days + 1)
-            table.description = (f"Soft-deleted expenses of user {user_id} ({when:%Y-%m-%d %H:%M} UTC). "
-                                 f"Restorable from the bot until they are erased.")
-            self.client.update_table(table, ["expires", "description"])
-            self.client.delete_table(src, not_found_ok=True)
+            n = 0
+        self.client.delete_table(table, not_found_ok=True)
         self._fact_tables_ready.discard(user_id)
-        self._dml(f"UPDATE `{self.ds}.dim_users` SET deleted_at = CURRENT_TIMESTAMP() WHERE user_id = @uid",
-                  uid=user_id)
-        return n, dst
-
-    def restore_user_data(self, user_id: int, archive: str | None) -> int:
-        """Put the archived expenses back (next to anything logged since) and unmark dim_users."""
-        n = 0
-        if archive:
-            try:
-                old = self.client.get_table(archive)
-            except NotFound:
-                old = None  # already expired
-            if old is not None:
-                self._ensure_fact_table(user_id)
-                have = {f.name for f in self.client.get_table(self.fact_table(user_id)).schema}
-                cols = ", ".join(f"`{f.name}`" for f in old.schema if f.name in have)
-                job = self.client.query(
-                    f"INSERT INTO `{self.fact_table(user_id)}` ({cols}) SELECT {cols} FROM `{archive}`"
-                )
-                job.result()
-                n = job.num_dml_affected_rows or 0
-                self.client.delete_table(archive, not_found_ok=True)
-        self._dml(f"UPDATE `{self.ds}.dim_users` SET deleted_at = NULL WHERE user_id = @uid", uid=user_id)
-        return n
-
-    def hard_delete_user_data(self, user_id: int, archive: str | None, cutoff: str) -> int:
-        """End of the retention period: erase the archive, the log rows up to the deletion, and the
-        dim_users row unless they came back and used the bot since (then deleted_at was cleared)."""
-        if archive:
-            self.client.delete_table(archive, not_found_ok=True)
-        removed = self.purge_user_log(user_id, cutoff)
-        self._dml(f"DELETE FROM `{self.ds}.dim_users` WHERE user_id = @uid AND deleted_at IS NOT NULL",
-                  uid=user_id)
-        return removed
-
-    def _dml(self, sql: str, **params):
-        types = {int: "INT64", str: "STRING"}
         try:
-            self.client.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=[
-                bigquery.ScalarQueryParameter(k, types[type(v)], v) for k, v in params.items()
-            ])).result()
+            self.client.query(
+                f"DELETE FROM `{self.ds}.dim_users` WHERE user_id = @uid",
+                job_config=bigquery.QueryJobConfig(
+                    query_parameters=[bigquery.ScalarQueryParameter("uid", "INT64", user_id)]
+                ),
+            ).result()
         except NotFound:
             pass
+        return n
 
     def purge_user_log(self, user_id: int, cutoff: str) -> int:
         """Delete the person's interaction-log rows up to `cutoff`. Raises while some are still
@@ -902,7 +558,6 @@ class Warehouse:
           a.actions, a.actions_30d, a.saved, a.last_seen
         FROM activity a
         LEFT JOIN `{self.ds}.dim_users` u USING (user_id)
-        WHERE u.deleted_at IS NULL  -- people who deleted their data don't show while it waits to be erased
         ORDER BY a.actions_30d DESC, a.actions DESC, a.last_seen DESC
         """
         try:
@@ -931,15 +586,12 @@ class Warehouse:
         return job.num_dml_affected_rows or 0
 
     def _totals(self, user_id: int, start: date, end: date) -> list[tuple[int, str, str, Decimal]]:
-        """(category_id, category name as saved, currency, total) of expenses only (not income or savings)
-        — the bot shows the name in the user's language."""
-        if user_id not in self._fact_tables_ready:
-            self._ready_if_exists(user_id)
+        """(category_id, category name as saved, currency, total) — the bot shows the name in the user's language."""
         try:
             rows = self.client.query(
                 f"""SELECT category_id, ANY_VALUE(category) AS category, currency, SUM(amount) AS total
                     FROM `{self.fact_table(user_id)}`
-                    WHERE expense_date BETWEEN @start AND @end AND {EXPENSES_ONLY}
+                    WHERE expense_date BETWEEN @start AND @end
                     GROUP BY category_id, currency
                     ORDER BY total DESC""",
                 job_config=bigquery.QueryJobConfig(
@@ -974,8 +626,7 @@ class Warehouse:
             self._add_missing_fact_columns(user_id)
             self._fact_tables_ready.add(user_id)
         rows = self.client.query(
-            f"""SELECT expense_id, expense_date, amount, currency, category_id, category, description, item_label, merchant,
-                       IFNULL(kind, 'expense') AS kind, goal_id
+            f"""SELECT expense_date, amount, currency, category_id, category, description, item_label, merchant
                 FROM `{self.fact_table(user_id)}`
                 WHERE expense_date BETWEEN @start AND @end
                 ORDER BY expense_date DESC, created_at DESC""",
@@ -991,48 +642,8 @@ class Warehouse:
     async def expenses(self, user_id: int, start: date, end: date) -> list[dict]:
         return await asyncio.to_thread(self._expenses, user_id, start, end)
 
-    def _money_flow(self, user_id: int, start: date, end: date) -> list[dict]:
-        """Per kind, goal and currency: the total within [start, end] and the all-time total
-        (savings balances need all time). One small query."""
-        try:
-            rows = self.client.query(
-                f"""SELECT IFNULL(kind, 'expense') AS kind, goal_id, currency,
-                           SUM(IF(expense_date BETWEEN @start AND @end, amount, 0)) AS period_total,
-                           SUM(amount) AS all_time
-                    FROM `{self.fact_table(user_id)}`
-                    GROUP BY 1, 2, 3""",
-                job_config=bigquery.QueryJobConfig(
-                    query_parameters=[
-                        bigquery.ScalarQueryParameter("start", "DATE", start),
-                        bigquery.ScalarQueryParameter("end", "DATE", end),
-                    ]
-                ),
-            ).result()
-        except NotFound:
-            return []
-        return [dict(r.items()) for r in rows]
-
-    async def money_flow(self, user_id: int, start: date, end: date) -> list[dict]:
-        if user_id not in self._fact_tables_ready:
-            await asyncio.to_thread(self._ready_if_exists, user_id)
-        return await asyncio.to_thread(self._money_flow, user_id, start, end)
-
-    def _ready_if_exists(self, user_id: int):
-        try:
-            self._add_missing_fact_columns(user_id)
-            self._fact_tables_ready.add(user_id)
-        except NotFound:
-            pass
-
-
-# Rows written before savings existed have kind NULL: they are expenses.
-EXPENSES_ONLY = "IFNULL(kind, 'expense') = 'expense'"
-
 
 def build_row(item: dict, category_id: int, category: str, confirmed_by: str = "user") -> dict:
-    kind = item.get("kind") or "expense"
-    suggested_kind = item.get("ai_kind") or kind
-    corrected = kind != suggested_kind or (kind == "expense" and category_id != item["category_id"])
     return {
         "expense_id": secrets.token_hex(8),
         "user_id": item["user_id"],
@@ -1045,13 +656,11 @@ def build_row(item: dict, category_id: int, category: str, confirmed_by: str = "
         "merchant": item.get("merchant"),
         "suggested_category": item["category"],
         "suggestion_source": item.get("suggestion_source"),
-        "was_corrected": corrected,
+        "was_corrected": category_id != item["category_id"],
         "source": item.get("source"),
         "raw_input": item.get("raw_input"),
         "item_label": item.get("label"),
         "confirmed_by": confirmed_by,
-        "kind": kind,
-        "goal_id": item.get("goal_id") if kind in ("saving", "withdrawal") else None,
         "created_at": _now(),
     }
 

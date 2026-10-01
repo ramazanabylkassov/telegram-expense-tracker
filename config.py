@@ -19,9 +19,8 @@ def _req(name: str) -> str:
 
 # --- Telegram -----------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = _req("TELEGRAM_BOT_TOKEN")
-# Your Telegram user ID: the bot's owner (no daily limits, 👥 Users, /block).
-# Anyone else can use the bot too, within the daily limits below.
-# Leave empty on first run: the bot will reply with your ID.
+# Your Telegram user ID. The bot is private to you unless you start household mode
+# with /household. Leave empty on first run: the bot will reply with your ID.
 _owner = os.getenv("OWNER_USER_ID") or os.getenv("ALLOWED_USER_IDS", "").split(",")[0]  # old name still works
 OWNER_USER_ID = int(_owner.strip()) if _owner.strip() else None
 
@@ -62,12 +61,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 VERTEX_LOCATION = os.getenv("VERTEX_LOCATION", "us-central1")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
-# AI prices in USD per million tokens, for the cost shown on the 🖥 App status page.
-# Defaults are Claude Haiku 4.5's list prices; set them for another model (0 = show tokens only).
-_haiku = LLM_PROVIDER == "claude" and "haiku" in CLAUDE_MODEL
-LLM_PRICE_INPUT = float(os.getenv("LLM_PRICE_INPUT", "1" if _haiku else "0"))
-LLM_PRICE_OUTPUT = float(os.getenv("LLM_PRICE_OUTPUT", "5" if _haiku else "0"))
-
 # --- Behaviour ----------------------------------------------------------------
 TIMEZONE = ZoneInfo(os.getenv("TIMEZONE", "Asia/Almaty"))
 DEFAULT_CURRENCY = os.getenv("DEFAULT_CURRENCY", "KZT")
@@ -76,16 +69,6 @@ PENDING_DB_PATH = os.getenv("PENDING_DB_PATH", "pending.sqlite3")
 # Telegram's "/" command list and the ☰ button next to the typing field.
 # Off by default: the ▶️ Start button covers everything, and typed commands still work.
 COMMAND_MENU = os.getenv("COMMAND_MENU", "off").strip().lower() in ("on", "true", "1", "yes")
-
-# Daily limits per person (the owner has none), reset at midnight in TIMEZONE. 0 = no limit.
-# Each message or voice note that goes to the AI counts once, however many expenses it holds.
-DAILY_TEXT_LIMIT = int(os.getenv("DAILY_TEXT_LIMIT", "50"))
-DAILY_VOICE_LIMIT = int(os.getenv("DAILY_VOICE_LIMIT", "30"))
-MAX_VOICE_SECONDS = int(os.getenv("MAX_VOICE_SECONDS", "120"))  # longer voice notes are refused (0 = any)
-
-# "Delete my data": the data is hidden at once and kept this many days (restorable from the bot),
-# then erased for good. 0 = erase right away, no restore.
-DELETE_RETENTION_DAYS = int(os.getenv("DELETE_RETENTION_DAYS", "30"))
 
 # A proposal nobody answers is saved with its suggested category after this many minutes
 # (counted from the proposal or the last tap on it). 0 = never auto-save.
@@ -97,12 +80,6 @@ AUTO_SAVE_MINUTES = float(os.getenv("AUTO_SAVE_MINUTES", "10"))
 INGEST_SECRET = os.getenv("INGEST_SECRET", "").strip() or None
 INGEST_HOST = os.getenv("INGEST_HOST", "127.0.0.1")  # a tunnel (e.g. Tailscale Funnel) forwards to this
 INGEST_PORT = int(os.getenv("INGEST_PORT", "8787"))
-# 📊 Monitoring dashboard (owner only; sign in from the bot). It has its own server that only
-# listens on this Mac (127.0.0.1), on a port the Tailscale tunnel doesn't forward.
-DASHBOARD = os.getenv("DASHBOARD", "on").strip().lower() in ("on", "true", "1", "yes")
-DASHBOARD_PORT = int(os.getenv("DASHBOARD_PORT", "8788"))
-if DASHBOARD and DASHBOARD_PORT == INGEST_PORT:
-    raise RuntimeError("DASHBOARD_PORT must differ from INGEST_PORT (the dashboard must not share the tunnelled port)")
 # Public address of the endpoint (e.g. https://your-mac.tail1234.ts.net). Needed for the bot's
 # 📲 Action Button menu, which gives every user their own key and the setup steps.
 INGEST_PUBLIC_URL = os.getenv("INGEST_PUBLIC_URL", "").strip().rstrip("/") or None
