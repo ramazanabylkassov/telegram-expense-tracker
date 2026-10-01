@@ -142,6 +142,7 @@ CATEGORIES = [
     "Gifts & Donations",
     "Personal care",
     "Taxes",
+    "Loans & Credit",
     "Other",
 ]
 
@@ -159,6 +160,7 @@ CATEGORY_HINTS = {
     "Travel": "flights, hotels, trips",
     "Gifts & Donations": "presents, charity",
     "Personal care": "haircut, cosmetics, beauty salon",
+    "Loans & Credit": "bank loan, mortgage, car loan and credit card payments, installment plans (рассрочка, Kaspi Red / Kaspi Кредит), interest and bank loan fees",
     "Taxes": "income, property, vehicle and land tax, social payments, pension contributions, state fees and fines",
     "Other": "anything that does not fit elsewhere",
 }
@@ -179,6 +181,7 @@ CATEGORY_NAMES_RU = {
     "Gifts & Donations": "Подарки и благотворительность",
     "Personal care": "Уход за собой",
     "Taxes": "Налоги",
+    "Loans & Credit": "Кредиты и рассрочка",
     "Other": "Другое",
 }
 
@@ -196,5 +199,6 @@ SEED_VARIANTS = {
     "Travel": {"merchants": ["Air Astana", "FlyArystan", "Aviata", "Booking.com"], "items": ["Flight", "Hotel"]},
     "Gifts & Donations": {"items": ["Gift", "Donation"]},
     "Personal care": {"items": ["Haircut", "Barber", "Cosmetics"]},
+    "Loans & Credit": {"merchants": ["Kaspi Red", "Kaspi Кредит", "Home Credit"], "items": ["Loan payment", "Mortgage", "Credit card", "Installment", "Car loan"]},
     "Taxes": {"merchants": ["eGov", "Salyk"], "items": ["Tax", "Income tax", "Property tax", "Vehicle tax", "Pension contribution", "Fine"]},
 }

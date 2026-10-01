@@ -253,7 +253,7 @@ UPDATE `YOUR_PROJECT.finance.dim_categories` SET is_active = FALSE WHERE name = 
 
 Categories are referenced by `category_id`, so renaming one doesn't break old rows. Each fact row also keeps the name as it was when the expense was saved. `schema.sql` has the full DDL and useful queries.
 
-On first start the bot creates and seeds everything: 14 categories and about 80 common Kazakhstan merchants and items. The seed data lives in `config.py`. A category added there later (like Taxes) is added once on the next start: it goes just before Other, and its seed merchants and items come with it unless people already mapped them elsewhere. A name already in `dim_categories`, even one you switched off, is never added again.
+On first start the bot creates and seeds everything: 15 categories and about 90 common Kazakhstan merchants and items. The seed data lives in `config.py`. A category added there later (like Taxes or Loans & Credit) is added once on the next start: it goes just before Other, and its seed merchants and items come with it unless people already mapped them elsewhere. A name already in `dim_categories`, even one you switched off, is never added again.
 
 ## Setup on your Mac (~15 min)
 

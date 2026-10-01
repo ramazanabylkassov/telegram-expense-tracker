@@ -136,7 +136,9 @@ Rules:
   - saving: money put aside into savings, a deposit, a piggy bank or towards a goal
     ("отложил 50000", "put 100k into savings", "на депозит 200к", "в копилку на машину 30к");
   - withdrawal: money taken back out of savings or a deposit ("снял 20000 с депозита", "took 50k from savings").
-  A refund, a transfer between the user's own everyday accounts, or a loan given/repaid is NOT a record.
+  A payment on a bank loan, mortgage, credit card or installment plan (рассрочка, кредит) IS an expense.
+  A refund, a transfer between the user's own everyday accounts, taking out a loan, or lending to / being
+  repaid by friends is NOT a record.
 - {goals}
 - Amounts: understand "1.5k", "2к", "полторы тысячи", "5 штук" etc. Return a plain number.
 - If no currency is mentioned, use {config.DEFAULT_CURRENCY}. "тг", "тенге", "₸" = KZT; "$", "bucks" = USD; "руб" = RUB.
